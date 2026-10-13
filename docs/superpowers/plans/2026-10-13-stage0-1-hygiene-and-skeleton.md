@@ -1121,6 +1121,6 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ---
 
 ## Что дальше (отдельные планы)
-- Этап 2: `factory_mcp.py` в content-factory (по образцу `tender_mcp.py`), `.mcp.json` в Agents_MY, замена `inbox/`/`runs/` на чтение брифа и отправку черновиков в `review`.
-- Этап 3: `/day` в боте, Планировщик Windows, единая лента-дайджест.
-- Этапы 4–5: вечерний отчёт, журнал доверия и поэтапная автономия.
+- Этап 2: Telegram-оркестратор и голос — новый бот (`orchestrator-bot` на VPS), `agent-listener` на ПК, `claude -p --resume`, расшифровка Whisper, голосовые бриф/правки/одобрение/вопросы. `inbox/brief.md` заменяется сообщением в чат, `summary.md` уходит ответом в чат.
+- Этап 3: `factory_mcp.py` в content-factory (по образцу `tender_mcp.py`), `.mcp.json` в Agents_MY, отправка черновиков в `review` и публикация одобренного.
+- Этапы 4–6: расписание и единая лента, вечерний отчёт, журнал доверия и поэтапная автономия.
