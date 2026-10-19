@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(sftp:*)",
+      "Bash(git push:*)",
+      "Bash(curl:*)",
+      "Bash(powershell:*)",
+      "Bash(pwsh:*)",
+      "Edit(/rules/**)",
+      "Edit(/tools/**)",
+      "Edit(/scripts/**)",
+      "Edit(/.claude/**)",
+      "Edit(/CLAUDE.md)",
+      "Edit(/inbox/**)",
+      "Read(~/.ssh/**)",
+      "Read(~/.claude/**)",
+      "Read(~/.codex/**)",
+      "Read(**/.env*)"
+    ]
+  }
+}

@@ -10,6 +10,6 @@ model: sonnet
 - В конце — блок «Источники:» со ссылками.
 - visual_prompt: описание тематической картинки без текста.
 Запиши `runs/<дата>/drafts/<id>.json`:
-{"id": "<дата>-vk-NN", "channel": "vk_editorial", "title": "...", "text": "...", "facts": [{"id": "f1", "text": "...", "source_url": "https://..."}], "source_urls": ["https://..."], "visual_prompt": "..."}
+{"id": "<slug темы из plan.json; при переписывании — <slug>-r>", "channel": "vk_editorial", "title": "...", "text": "...", "facts": [{"id": "f1", "text": "...", "source_url": "https://..."}], "source_urls": ["https://..."], "visual_prompt": "..."}
 Поле facts — массив ОБЪЕКТОВ, скопированных из исследования без изменений: [{"id": "f1", "text": "...", "source_url": "https://..."}]. Не номера и не строки. Файл — чистый JSON без markdown.
 Ответ: путь к черновику.

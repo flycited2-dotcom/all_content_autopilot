@@ -10,6 +10,6 @@ model: sonnet
 - Структура: цепляющая первая строка → 2–4 коротких абзаца пользы → мягкий призыв.
 - visual_prompt: описание тематической картинки без текста на изображении.
 Запиши `runs/<дата>/drafts/<id>.json` строго в формате:
-{"id": "<дата>-tg-NN", "channel": "tg_editorial", "title": "...", "text": "...", "facts": [{"id": "f1", "text": "...", "source_url": "https://..."}], "source_urls": ["https://..."], "visual_prompt": "..."}
+{"id": "<slug темы из plan.json; при переписывании — <slug>-r>", "channel": "tg_editorial", "title": "...", "text": "...", "facts": [{"id": "f1", "text": "...", "source_url": "https://..."}], "source_urls": ["https://..."], "visual_prompt": "..."}
 Поле facts — массив ОБЪЕКТОВ, скопированных из исследования без изменений: [{"id": "f1", "text": "...", "source_url": "https://..."}]. Не номера и не строки. Файл — чистый JSON без markdown.
 Ответ: путь к черновику.

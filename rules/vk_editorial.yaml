@@ -1,7 +1,7 @@
 # Экспертный пост в группу ВК.
 min_length: 400
 max_length: 3500          # как StrictCriticAgent в content-factory
-stop_words: [гарантированно, "лучший в мире", "без риска", "100%", кредит, рассрочка]
+stop_words: [гарантирован, "лучший в мире", "лучшая в мире", "лучшее в мире", "без риска", "100%", кредит, рассрочк]  # основы: ищутся с начала слова
 forbid_prices: true
 require_sources: true
 require_visual_prompt: true
