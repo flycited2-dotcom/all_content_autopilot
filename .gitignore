@@ -1,0 +1,5 @@
+snapshots/
+runs/
+inbox/brief.md
+__pycache__/
+.pytest_cache/
