@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Agent",
+      "WebSearch",
+      "WebFetch",
+      "Write(/runs/**)",
+      "Edit(/runs/**)",
+      "Bash(python tools/check_draft.py:*)"
+    ],
+    "deny": [
+      "Read(**/.env*)",
+      "Write(/rules/**)",
+      "Write(/tools/**)"
+    ]
+  }
+}

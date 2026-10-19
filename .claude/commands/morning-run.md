@@ -1,0 +1,29 @@
+---
+description: Утренний прогон контент-завода (локальный режим, без публикации)
+argument-hint: <дата YYYY-MM-DD>
+---
+Дата прогона: $ARGUMENTS. Папка runs/$ARGUMENTS/ уже создана запускающим скриптом (Bash для этого не нужен).
+
+Режим запуска — безголовый (`claude -p`): сессия заканчивается, как только ты завершаешь ход.
+- Субагентов вызывай только синхронно: `run_in_background: false`. Параллельность — несколько вызовов Agent в одном сообщении.
+- Не завершай ход и не пиши «жду», пока не выполнен шаг 8 (summary.md записан и выведен).
+
+Раскладка файлов прогона — строго такая (передавай субагентам точные пути):
+- runs/$ARGUMENTS/plan.json
+- runs/$ARGUMENTS/research/<slug>.json
+- runs/$ARGUMENTS/drafts/<id>.json — JSON-объект в формате из .claude/agents/tg-editor.md / vk-editor.md, без markdown вокруг
+- runs/$ARGUMENTS/verdicts/<id>.json
+- runs/$ARGUMENTS/product_tasks.json
+- runs/$ARGUMENTS/summary.md
+
+1. Прочитай inbox/brief.md. Если файла нет — запиши runs/$ARGUMENTS/summary.md с текстом «Брифа нет — прогон пропущен» и закончи.
+2. Составь план и запиши runs/$ARGUMENTS/plan.json:
+   {"brief": "<кратко>", "topics": [{"slug": "латиница", "title": "...", "channels": ["tg_editorial", "vk_editorial"]}], "products": true|false}
+   По умолчанию: 2 темы для TG, 1 для ВК, товарные задачи — если бриф не запрещает. Не больше 4 тем.
+3. Для каждой темы вызови субагента researcher (темы — параллельно).
+4. По каждому исследованию с ≥ 3 фактами вызови tg-editor и/или vk-editor по plan.json (параллельно). Тему с «недостаточно фактов» пропусти и отметь в плане.
+5. Если products=true — вызови product-planner.
+6. Для каждого черновика вызови critic. Отклонённый черновик — один раз верни редактору с notes критика на переписывание (новый id с суффиксом -r), затем снова critic. Второй отказ — окончательный.
+7. Вызови reporter.
+8. Последним сообщением выведи содержимое summary.md.
+Ничего не публикуй и не вызывай инструменты Telegram/ВК.
