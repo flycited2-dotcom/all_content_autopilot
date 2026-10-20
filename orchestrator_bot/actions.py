@@ -43,4 +43,19 @@ def cancel_logged(log_ref, factory, store, msg_id) -> str:
     keys = entry["result"].get("accepted") or []
     result = factory.cancel(keys)
     store.log_action(msg_id, "cancel", {"log_id": entry["id"], "keys": keys}, result)
-    return f"↩️ Отменено: {result.get('cancelled', 0)}"
+    lines = [f"↩️ Отменено: {result.get('cancelled', 0)}"]
+    by_status: dict[str, int] = {}
+    for item in result.get("not_cancelled") or []:
+        by_status[item.get("status", "")] = by_status.get(item.get("status", ""), 0) + 1
+    for status, n in by_status.items():
+        lines.append(f"{n} — {_NOT_CANCELLED.get(status, f'не отменить (статус {status})')}")
+    return "\n".join(lines)
+
+
+_NOT_CANCELLED = {
+    "preview": "уже на превью в канале проверки: отменять поздно, отклоните кнопкой ❌ там",
+    "cancelled": "уже были отменены",
+    "failed": "уже упали с ошибкой — в работе их нет",
+    "held": "отложены конвейером",
+    "missing": "не найдены в конвейере",
+}

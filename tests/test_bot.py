@@ -280,3 +280,12 @@ def test_default_telegram_client_is_resilient_to_connect_timeouts():
     assert client.timeout.connect <= 5
     assert client.timeout.read >= 30                       # long-poll getUpdates(timeout=25) помещается
     assert client._transport._pool._retries >= 5           # повтор только установки соединения — без дублей
+
+
+def test_cancel_explains_items_already_in_preview(deps):
+    deps.factory.cancel = lambda keys: {"cancelled": 0, "not_cancelled": [{"key": k, "status": "preview"} for k in keys]}
+    log_id = deps.store.log_action(1, "enqueue", {"category": "холодильники"}, {"accepted": ["k1", "k2"]})
+    bot.handle_update(_cb(f"c:{log_id}"), deps)
+    text = deps.tg.texts()[-1]
+    assert "Отменено: 0" in text
+    assert "уже на превью" in text and "❌" in text and "2" in text
