@@ -1,0 +1,151 @@
+import json
+import threading
+import urllib.error
+import urllib.request
+
+import pytest
+
+from orchestrator_bot.api import make_server
+from orchestrator_bot.config import Settings
+from orchestrator_bot.store import Store
+
+TOKEN = "t0ken"
+
+
+class FakeFactory:
+    def __init__(self, total=2):
+        self.total = total
+        self.enqueued = []
+        self.cancelled = []
+
+    def hint(self):
+        return {"brands": ["Beko", "Ресанта"], "sources": ["manual"]}
+
+    def resolve(self, action):
+        return {"total_matches": self.total, "items": []}
+
+    def enqueue(self, action):
+        self.enqueued.append(action)
+        return {"requested": 2, "accepted": ["excel|beko|x100", "excel|beko|x200"],
+                "items": [{"name": "Холодильник Beko X100"}, {"name": "Холодильник Beko X200"}], "due_at": None}
+
+    def cancel(self, keys):
+        self.cancelled.append(keys)
+        return {"cancelled": len(keys), "text": ""}
+
+    def status(self, since):
+        return {"by_status": {}}
+
+
+@pytest.fixture
+def server(tmp_path):
+    store = Store(tmp_path / "orch.db")
+    factory = FakeFactory()
+    sent = []
+    srv = make_server(store, factory, lambda text, kb=None: sent.append((text, kb)), TOKEN, 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield store, factory, sent, f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
+def _call(base, method, path, body=None, token=TOKEN):
+    req = urllib.request.Request(base + path, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"X-Orch-Token": token, "Content-Type": "application/json"} if token
+                                 else {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read())
+
+
+def _enqueue_intent(count=None):
+    return {"reply": "Сделаю.", "actions": [{"type": "enqueue_products", "category": "холодильники",
+                                             "count": count, "quotas": {"beko": 2}}]}
+
+
+def test_settings_from_env_defaults():
+    s = Settings.from_env({"ORCH_BOT_TOKEN": "x", "ORCH_OWNER_CHAT_ID": "1264067528", "ORCH_API_TOKEN": "y"})
+    assert (s.owner_chat_id, s.api_port, s.doubt_threshold, s.whisper_model) == (1264067528, 8790, 40, "small")
+
+
+def test_claim_returns_oldest_and_requeues_stale(tmp_path):
+    store = Store(tmp_path / "orch.db")
+    first = store.add_message(1, "text", "раз", now=100.0)
+    store.add_message(2, "text", "два", now=101.0)
+    assert store.claim_next(now=200.0)["id"] == first
+    assert store.claim_next(now=201.0)["text"] == "два"
+    assert store.claim_next(now=300.0) is None
+    assert store.claim_next(now=200.0 + 601)["id"] == first      # слушатель упал — вернулось
+
+
+def test_api_rejects_missing_token(server):
+    *_, base = server
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _call(base, "POST", "/heartbeat", {}, token=None)
+    assert exc.value.code == 401
+
+
+def test_intent_enqueue_sends_reply_with_cancel_button(server):
+    store, factory, sent, base = server
+    msg = store.add_message(10, "voice", "поставь 2 холодильника беко")
+    out = _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent(count=2)})
+    assert out["ok"] is True
+    text, kb = sent[-1]
+    assert "Сделаю." in text and "Поставил" in text
+    assert kb[0][0]["callback_data"].startswith("c:")
+    assert len(factory.enqueued) == 1
+
+
+def test_duplicate_intent_executes_once(server):
+    store, factory, sent, base = server
+    msg = store.add_message(11, "text", "поставь")
+    _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent(count=2)})
+    out = _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent(count=2)})
+    assert out["duplicate"] is True
+    assert len(factory.enqueued) == 1
+
+
+def test_intent_with_doubt_saves_ask_with_buttons(server):
+    store, factory, sent, base = server
+    factory.total = 57
+    msg = store.add_message(12, "text", "все холодильники")
+    _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent()})
+    text, kb = sent[-1]
+    assert [b["callback_data"].rsplit(":", 1)[1] for b in kb[0]] == ["0", "1", "2"]
+    assert "57" in text
+    assert factory.enqueued == []
+
+
+def test_next_includes_catalog_hint_and_marks_claimed(server):
+    store, factory, sent, base = server
+    store.add_message(13, "text", "привет")
+    out = _call(base, "GET", "/next")
+    assert out["message"]["text"] == "привет"
+    assert out["context"]["hint"] == factory.hint()
+    assert _call(base, "GET", "/next")["message"] is None
+
+
+def test_editorial_actions_returned_to_listener(server):
+    store, factory, sent, base = server
+    msg = store.add_message(14, "text", "сделай пост")
+    intent = {"reply": "Запускаю.", "actions": [{"type": "run_editorial", "brief": "тепловые насосы",
+                                                 "channels": ["vk_editorial"]}]}
+    out = _call(base, "POST", "/intent", {"message_id": msg, "intent": intent})
+    assert out["editorial"] == [{"type": "run_editorial", "brief": "тепловые насосы", "channels": ["vk_editorial"]}]
+
+
+def test_heartbeat_and_reply(server):
+    store, factory, sent, base = server
+    _call(base, "POST", "/heartbeat", {})
+    assert store.last_heartbeat() is not None
+    _call(base, "POST", "/reply", {"text": "Черновик готов"})
+    assert sent[-1][0] == "Черновик готов"
+
+
+def test_unparseable_intent_is_rejected_without_burning_the_message(server):
+    store, factory, sent, base = server
+    msg = store.add_message(15, "text", "поставь")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _call(base, "POST", "/intent", {"message_id": msg, "intent": "не json"})
+    assert exc.value.code == 400
+    out = _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent(count=2)})
+    assert "duplicate" not in out and len(factory.enqueued) == 1
