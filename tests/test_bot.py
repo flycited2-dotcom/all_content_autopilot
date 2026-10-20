@@ -271,3 +271,12 @@ def test_voice_reply_to_draft_carries_draft_id(deps):
     update["message"]["reply_to_message"] = {"message_id": 99, "text": "📝 Заголовок\n\nid: nasosy-v2"}
     bot.handle_update(update, deps)
     assert "id: nasosy-v2" in deps.store.claim_next(NOW)["text"]
+
+
+def test_default_telegram_client_is_resilient_to_connect_timeouts():
+    # как publish/telegram.py content-factory: связь VPS↔Telegram периодически не устанавливается
+    from orchestrator_bot.telegram_api import telegram_client
+    client = telegram_client()
+    assert client.timeout.connect <= 5
+    assert client.timeout.read >= 30                       # long-poll getUpdates(timeout=25) помещается
+    assert client._transport._pool._retries >= 5           # повтор только установки соединения — без дублей

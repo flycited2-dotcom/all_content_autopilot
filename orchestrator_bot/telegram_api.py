@@ -4,12 +4,23 @@ from __future__ import annotations
 import httpx
 
 _MAX_TEXT = 4000            # лимит Telegram 4096, с запасом
+CONNECT_TIMEOUT = 2.0       # как content-factory publish/telegram.py: связь VPS↔Telegram периодически
+CONNECT_RETRIES = 7         # не устанавливается; повторяется только соединение — запрос не дублируется
+
+
+def telegram_client(timeout: float = 40.0) -> httpx.Client:
+    return httpx.Client(
+        timeout=httpx.Timeout(timeout, connect=CONNECT_TIMEOUT),
+        transport=httpx.HTTPTransport(retries=CONNECT_RETRIES,
+                                      limits=httpx.Limits(max_connections=20, max_keepalive_connections=10,
+                                                          keepalive_expiry=120.0)),
+    )
 
 
 class TelegramApi:
     def __init__(self, token: str, http: httpx.Client | None = None):
         self.token = token
-        self.http = http or httpx.Client(timeout=60)
+        self.http = http or telegram_client()
         self.base = f"https://api.telegram.org/bot{token}/"
 
     def _call(self, method: str, **params):
