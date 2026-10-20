@@ -13,3 +13,8 @@
 ## Как устроен прогон
 /morning-run <дата>: бриф (inbox/brief.md) → план → researcher → tg-editor / vk-editor / product-planner → critic → reporter.
 Правила каналов: rules/*.yaml (проверяет tools/check_draft.py), голос бренда: rules/brand.md.
+
+## Чат-режим (этап 2)
+Владелец пишет или надиктовывает в Telegram-бот оркестратора. Слушатель на ПК на каждое сообщение вызывает
+`/chat-turn runs/chat/<id>.json` — ты возвращаешь только JSON-намерение; исполняет его сервер (белый список действий,
+правила сомнения). Редакционные посты — `/morning-run`, правка черновика — `/revise-draft`.
