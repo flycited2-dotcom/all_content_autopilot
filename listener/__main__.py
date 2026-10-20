@@ -64,7 +64,11 @@ def main() -> int:
     worker = EditorialWorker(brain.run_with_kill, api.reply, root=ROOT)
     turn = lambda payload, sess: brain.run_turn(payload, sess, root=ROOT)  # noqa: E731
     last_beat = 0.0
+    parent = os.getppid()
     while True:
+        if not lifecycle.parent_alive(parent):          # «Остановить» в Планировщике погасил conhost — выходим
+            log.info("родительский процесс завершён — слушатель останавливается")
+            return 0
         try:
             if tunnel:
                 tunnel.ensure()

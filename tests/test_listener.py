@@ -270,3 +270,10 @@ def test_job_marker_written_while_running(tmp_path):
     assert (tmp_path / "runs" / "chat" / "editorial-job.json").exists()
     gate.set()
     worker.join_idle(5)
+
+
+def test_parent_alive_detects_running_and_missing_process():
+    import os
+    from listener.lifecycle import parent_alive
+    assert parent_alive(os.getpid()) is True
+    assert parent_alive(4_000_000) is False                 # такого PID нет
