@@ -8,5 +8,5 @@ dependencies = ["PyYAML>=6.0"]
 dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
-pythonpath = ["tools"]
+pythonpath = ["tools", "."]
 testpaths = ["tests"]
