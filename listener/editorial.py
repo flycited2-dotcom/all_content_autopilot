@@ -97,7 +97,22 @@ class EditorialWorker:
         base = re.sub(r"-v\d+$", "", action["draft_id"])
         drafts = self.root / "runs" / day / "drafts"
         versions = sorted(drafts.glob(f"{base}-v*.json"), key=lambda p: int(p.stem.rsplit("-v", 1)[1]))
-        self._post(self._draft_text(versions[-1]) if versions else "❌ Новая версия черновика не появилась")
+        if not versions:
+            self._post("❌ Новая версия черновика не появилась")
+            return
+        text = self._draft_text(versions[-1])
+        verdict = self._verdict(self.root / "runs" / day, versions[-1].stem)
+        if verdict is not None and not verdict.get("ok"):
+            notes = (verdict.get("judgement") or {}).get("notes") or []
+            text = f"⚠️ Контролёр не принял: {notes[-1] if notes else 'без пояснения'}\n\n{text}"
+        self._post(text)
+
+    @staticmethod
+    def _verdict(run_dir, draft_id) -> dict | None:
+        try:
+            return json.loads((run_dir / "verdicts" / f"{draft_id}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
 
     @staticmethod
     def _accepted(run_dir, draft_id) -> bool:

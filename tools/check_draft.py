@@ -148,8 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2
     reasons = check(draft, rules, research_facts)
-    print(json.dumps({"ok": not reasons, "channel": draft["channel"], "reasons": reasons},
-                     ensure_ascii=False))
+    print(json.dumps({"ok": not reasons, "channel": draft["channel"], "length": len(draft["text"]),
+                      "reasons": reasons}, ensure_ascii=False))
     return 0 if not reasons else 1
 
 

@@ -176,3 +176,8 @@ def test_bom_draft_is_accepted(tmp_path, rules_dir, capsys):
     path = tmp_path / "bom.json"
     path.write_text(json.dumps(_draft(), ensure_ascii=False), encoding="utf-8-sig")
     assert check_draft.main([str(path), "--rules-dir", str(rules_dir)]) == 0
+
+
+def test_main_reports_text_length(tmp_path, rules_dir, capsys):
+    code, out = _run(tmp_path, rules_dir, _draft(), capsys)
+    assert out["length"] == len(_draft()["text"])

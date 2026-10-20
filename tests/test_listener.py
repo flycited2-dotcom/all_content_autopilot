@@ -221,3 +221,22 @@ def test_install_task_runs_python_directly():
     assert "-m listener" in script and "listener.ps1" not in script
     # скрытая консоль: дочерние claude/ssh/powershell наследуют её и не открывают окон
     assert "conhost.exe" in script and "--headless" in script and "pythonw" not in script
+
+
+def test_revise_marks_rejected_version(tmp_path):
+    day = tmp_path / "runs" / "2026-10-21"
+    (day / "drafts").mkdir(parents=True)
+    (day / "verdicts").mkdir()
+    (day / "drafts" / "nasosy.json").write_text('{"id": "nasosy", "title": "t", "text": "x"}', encoding="utf-8")
+
+    def runner(cmd, **kw):
+        (day / "drafts" / "nasosy-v2.json").write_text('{"id": "nasosy-v2", "title": "Т", "text": "Короче"}', encoding="utf-8")
+        (day / "verdicts" / "nasosy-v2.json").write_text(
+            '{"ok": false, "judgement": {"notes": ["хорошо", "Итог: пометка «вдвое» не выполнена — reject"]}}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+    posted = []
+    worker = EditorialWorker(runner, lambda text, keyboard=None: posted.append(text), root=tmp_path, today=lambda: "2026-10-21")
+    worker.submit({"type": "revise_editorial", "draft_id": "nasosy", "notes": "вдвое"})
+    worker.join_idle(5)
+    assert posted[-1].startswith("⚠️ Контролёр не принял")
+    assert "вдвое" in posted[-1] and "Короче" in posted[-1]
