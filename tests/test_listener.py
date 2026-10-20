@@ -194,3 +194,28 @@ def test_revise_finds_draft_from_previous_day(tmp_path):
     worker.join_idle(5)
     assert "/revise-draft 2026-10-20 nasosy" in seen[0][2]
     assert "Короче" in posted[-1]
+
+
+def test_single_instance_lock():
+    from listener.lifecycle import acquire_instance_lock
+    first = acquire_instance_lock(port=0)          # 0 → свободный порт; берём его номер для второй попытки
+    port = first.getsockname()[1]
+    assert acquire_instance_lock(port=port) is None
+    first.close()
+    again = acquire_instance_lock(port=port)
+    assert again is not None
+    again.close()
+
+
+def test_stale_tunnel_detection_only_matches_our_tunnel():
+    from listener.lifecycle import is_our_tunnel
+    ours = "ssh -N -o ExitOnForwardFailure=yes -i C:/Users/x/.ssh/id_agents_tunnel -p 2222 -L 8790:127.0.0.1:8790 root@h"
+    assert is_our_tunnel(ours)
+    assert not is_our_tunnel("ssh sprintbox-itp")
+    assert not is_our_tunnel("ssh -L 8790:127.0.0.1:8790 other@host")
+
+
+def test_install_task_runs_python_directly():
+    from pathlib import Path
+    script = (Path(__file__).resolve().parents[1] / "scripts" / "install-listener-task.ps1").read_text(encoding="utf-8-sig")
+    assert "-m listener" in script and "listener.ps1" not in script
