@@ -50,7 +50,7 @@ ssh sprintbox-itp 'cp /opt/agents-my/deploy/orchestrator-*.service /opt/agents-m
 - `pip install -r requirements-pc.txt`.
 - Пользовательская переменная Windows `ORCH_API_TOKEN` = значение из серверного `.env` (не в файлы git).
 - `powershell -ExecutionPolicy Bypass -File scripts\install-listener-task.ps1`, затем `Start-ScheduledTask -TaskName 'AgentsMY Listener'`.
-  Задача запускает `pythonw -m listener` напрямую: «Остановить» в Планировщике действительно останавливает слушатель.
+  Задача запускает `conhost.exe --headless python -m listener`: окна не появляются (дочерние claude/ssh наследуют скрытую консоль), «Остановить» в Планировщике останавливает слушатель.
   Второй экземпляр не запустится (замок на 127.0.0.1:8791); осиротевшие туннели убираются при старте. Вручную: `python -m listener`.
 - Журнал: `runs\chat\listener.log`.
 

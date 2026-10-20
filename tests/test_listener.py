@@ -219,3 +219,5 @@ def test_install_task_runs_python_directly():
     from pathlib import Path
     script = (Path(__file__).resolve().parents[1] / "scripts" / "install-listener-task.ps1").read_text(encoding="utf-8-sig")
     assert "-m listener" in script and "listener.ps1" not in script
+    # скрытая консоль: дочерние claude/ssh/powershell наследуют её и не открывают окон
+    assert "conhost.exe" in script and "--headless" in script and "pythonw" not in script

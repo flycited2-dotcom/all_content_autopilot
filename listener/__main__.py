@@ -40,7 +40,7 @@ def process_once(api, worker, turn, sess) -> bool:
 def main() -> int:
     log_file = Path(os.environ.get("ORCH_LOG_FILE", ROOT / "runs" / "chat" / "listener.log"))
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    # только файл: под pythonw (задача Планировщика без окна) stdout/stderr отсутствуют
+    # только файл: слушатель живёт в скрытой консоли (conhost --headless), вывод туда никто не читает
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.FileHandler(log_file, encoding="utf-8")])
     for name in ("httpx", "httpcore"):          # не писать каждый опрос раз в 3 с
