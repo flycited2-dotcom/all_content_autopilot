@@ -1,0 +1,14 @@
+[Unit]
+Description=Agents_MY orchestrator bot (Telegram, voice, local API for the PC listener)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/agents-my
+EnvironmentFile=/opt/agents-my/.env
+ExecStart=/opt/agents-my/.venv/bin/python -m orchestrator_bot run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

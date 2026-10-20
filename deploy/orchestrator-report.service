@@ -1,0 +1,8 @@
+[Unit]
+Description=Agents_MY evening report
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/agents-my
+EnvironmentFile=/opt/agents-my/.env
+ExecStart=/opt/agents-my/.venv/bin/python -m orchestrator_bot report
