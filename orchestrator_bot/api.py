@@ -63,10 +63,17 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
             self._json(200, {"message": message, "context": {"hint": hint, "today": store.actions_since(start_of_day(now))}})
 
         def do_POST(self):
+            try:
+                body = self._body()                # дочитать тело до ответа, иначе 401 рвёт соединение (Windows)
+            except ValueError as exc:
+                body, bad = None, exc
+            else:
+                bad = None
             if not self._authorized():
                 return
+            if bad is not None:
+                return self._json(400, {"error": str(bad)})
             try:
-                body = self._body()
                 if self.path == "/heartbeat":
                     store.heartbeat(clock())
                     return self._json(200, {"ok": True})
