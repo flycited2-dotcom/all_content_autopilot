@@ -36,6 +36,7 @@ class Result:
     text: str
     log_id: int | None = None
     ask_id: int | None = None
+    buttons: list[dict] = field(default_factory=list)
 
 
 def parse_intent(raw: str) -> dict:
@@ -144,4 +145,6 @@ def render(reply: str, results: list[Result]) -> tuple[str, list[list[dict]]]:
         if result.ask_id is not None and result.outcome.options:
             keyboard.append([{"text": option, "callback_data": f"a:{result.ask_id}:{n}"}
                              for n, option in enumerate(result.outcome.options)])
+        if result.buttons:
+            keyboard.append(list(result.buttons))
     return "\n".join(lines), keyboard

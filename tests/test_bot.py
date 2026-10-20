@@ -38,6 +38,10 @@ class FakeTg:
 class FakeFactory:
     def __init__(self):
         self.enqueued, self.cancelled = [], []
+        self.started = False
+        self.worker_state = {"generation": False, "agent_online": False, "last_seen": "2026-10-19T23:10:58",
+                             "lanes": [{"lane": "desktop-a1", "seen_at": "2026-10-19T23:10:58", "online": False}],
+                             "commands": {}}
 
     def hint(self):
         return {"brands": ["Ресанта", "Daichi"], "sources": ["splithub"]}
@@ -55,6 +59,14 @@ class FakeFactory:
 
     def status(self, since):
         return {"by_status": {"new": 3}}
+
+    def workers(self):
+        return self.worker_state
+
+    def start_workers(self):
+        self.started = True
+        return {"generation": True, "commanded": ["agent_command"], "requested_run": True}
+
 
 
 @pytest.fixture
@@ -197,3 +209,14 @@ def test_cancel_works_even_if_answer_callback_fails(deps):
     log_id = deps.store.log_action(1, "enqueue", {"category": "x"}, {"accepted": ["k1"]})
     bot.handle_update(_cb(f"c:{log_id}"), deps)
     assert deps.factory.cancelled == [["k1"]]
+
+
+def test_start_button_starts_workers(deps):
+    bot.handle_update(_cb("w:start"), deps)
+    assert deps.factory.started is True
+    assert "Запуск" in deps.tg.texts()[-1]
+
+
+def test_status_shows_content_agent_state(deps):
+    bot.handle_update(_msg("/status"), deps)
+    assert "генерация выключена" in deps.tg.texts()[-1]

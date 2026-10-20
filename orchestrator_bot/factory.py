@@ -66,5 +66,11 @@ class Factory:
     def cancel(self, keys: list[str]) -> dict:
         return self._run("cancel", "--keys", ",".join(keys))
 
+    def workers(self) -> dict:
+        return self._run("workers")
+
+    def start_workers(self) -> dict:
+        return self._run("start-workers")
+
     def status(self, since: float) -> dict:
         return self._run("status", "--since", str(since))

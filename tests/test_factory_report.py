@@ -58,3 +58,8 @@ def test_logging_hides_http_request_urls_with_token():
     configure_logging()
     for name in ("httpx", "httpcore"):
         assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING
+
+
+def test_report_includes_content_agent_state():
+    workers = {"generation": True, "agent_online": False, "last_seen": "2026-10-19T23:10:58", "lanes": [{}], "commands": {}}
+    assert "фото-агент не на связи" in build_report({"by_status": {}}, [], NOW, NOW, workers=workers)

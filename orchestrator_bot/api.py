@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from orchestrator_bot import actions, intents
+from orchestrator_bot import actions, intents, workers
 from orchestrator_bot.intents import Outcome, Result
 
 log = logging.getLogger("orchestrator_bot")
@@ -40,6 +40,10 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
             except Exception as exc:
                 log.exception("исполнение %s", outcome.kind)
                 results.append(Result(outcome, _failed(outcome.text or outcome.kind, exc)))
+    if any(r.log_id is not None for r in results):        # что-то поставлено — не будет ли ждать?
+        warning = workers.note(factory)
+        if warning:
+            results.append(warning)
     text, keyboard = intents.render(reply, results)
     try:
         send(text or "Принял.", keyboard)
@@ -85,13 +89,18 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
                 return self._json(404, {"error": "not found"})
             now = clock()
             message = store.claim_next(now)
-            hint = {}
-            if message:                                 # каталог нужен только для настоящего сообщения
+            hint, agent = {}, ""
+            if message:                                 # каталог и агент нужны только для настоящего сообщения
                 try:
                     hint = factory.hint()
                 except Exception:
                     log.exception("подсказка каталога")
-            self._json(200, {"message": message, "context": {"hint": hint, "today": store.actions_since(start_of_day(now))}})
+                try:
+                    agent = workers.readiness(factory.workers())[1]
+                except Exception:
+                    agent = "состояние контент-агента неизвестно"
+            self._json(200, {"message": message, "context": {"hint": hint, "workers": agent,
+                                                              "today": store.actions_since(start_of_day(now))}})
 
         def do_POST(self):
             try:

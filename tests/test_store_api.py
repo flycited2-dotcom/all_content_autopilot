@@ -17,6 +17,8 @@ class FakeFactory:
         self.total = total
         self.hints = 0
         self.fail_enqueue = False
+        self.started = False
+        self.worker_state = {"generation": True, "agent_online": True, "last_seen": None, "lanes": [], "commands": {}}
         self.enqueued = []
         self.cancelled = []
 
@@ -40,6 +42,14 @@ class FakeFactory:
 
     def status(self, since):
         return {"by_status": {}}
+
+    def workers(self):
+        return self.worker_state
+
+    def start_workers(self):
+        self.started = True
+        return {"generation": True, "commanded": ["agent_command"], "requested_run": True}
+
 
 
 @pytest.fixture
@@ -192,3 +202,27 @@ def test_send_failure_still_completes(tmp_path):
     out = handle_intent(store, FakeFactory(), broken_send, msg, _enqueue_intent(count=2))
     assert out["ok"] is True
     assert store.claim_next(now=10**10) is None
+
+
+def test_enqueue_warns_and_offers_start_when_agent_not_running(server):
+    store, factory, sent, base = server
+    factory.worker_state = {"generation": False, "agent_online": False, "last_seen": None, "lanes": [], "commands": {}}
+    msg = store.add_message(30, "text", "поставь")
+    _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent(count=2)})
+    text, kb = sent[-1]
+    assert "⚠️" in text and "генерация выключена" in text
+    assert ["w:start"] in [[b["callback_data"]] for row in kb for b in row]
+
+
+def test_no_warning_when_agent_ready(server):
+    store, factory, sent, base = server
+    msg = store.add_message(31, "text", "поставь")
+    _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent(count=2)})
+    assert "⚠️" not in sent[-1][0]
+
+
+def test_next_context_includes_content_agent_state(server):
+    store, factory, sent, base = server
+    factory.worker_state = {"generation": False, "agent_online": True, "last_seen": None, "lanes": [], "commands": {}}
+    store.add_message(32, "text", "почему не генерируется?")
+    assert "генерация выключена" in _call(base, "GET", "/next")["context"]["workers"]

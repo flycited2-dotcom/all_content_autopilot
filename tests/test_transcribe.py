@@ -88,3 +88,11 @@ def test_factory_hint_cached_for_ttl():
     now[0] += 601
     f.hint()
     assert len(record) == 2
+
+
+def test_factory_workers_and_start_commands():
+    record = []
+    f = Factory("/venv/python", "/opt/cf", runner=_runner(record, stdout='{"generation": true}'))
+    f.workers()
+    f.start_workers()
+    assert [r[0][3] for r in record] == ["workers", "start-workers"]

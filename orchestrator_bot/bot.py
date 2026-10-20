@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from orchestrator_bot import actions, intents
+from orchestrator_bot import actions, intents, workers
 from orchestrator_bot.api import start_of_day
 from orchestrator_bot.intents import Outcome
 
@@ -54,7 +54,12 @@ def status_text(deps) -> str:
         pipeline = ", ".join(f"{k}: {v}" for k, v in sorted(by_status.items())) or "пусто"
     except Exception as exc:                        # content-factory недоступен — всё равно отвечаем
         pipeline = f"недоступен ({exc.__class__.__name__})"
-    return f"📋 Статус\nКонвейер: {pipeline}\n{_pc_line(deps, now)}\nВ очереди к ПК: {deps.store.count_new()}"
+    try:
+        agent = workers.readiness(deps.factory.workers())[1]
+    except Exception as exc:
+        agent = f"Контент-агент: не удалось проверить ({exc.__class__.__name__})"
+    return (f"📋 Статус\nКонвейер: {pipeline}\n{agent}\n{_pc_line(deps, now)}\n"
+            f"В очереди к ПК: {deps.store.count_new()}")
 
 
 def _menu(deps, chat_id):
@@ -105,6 +110,11 @@ def _callback(deps, cq):
         deps.tg.send(chat_id, status_text(deps))
     elif data == "m:report":
         _report(deps, chat_id)
+    elif data == "w:start":
+        try:
+            deps.tg.send(chat_id, workers.start(deps.factory))
+        except Exception as exc:
+            deps.tg.send(chat_id, f"❌ Запустить не удалось: {exc.__class__.__name__}")
     elif data.startswith("c:"):
         deps.tg.send(chat_id, actions.cancel_logged(data[2:], deps.factory, deps.store, None))
     elif data.startswith("a:"):
@@ -124,7 +134,10 @@ def _callback(deps, cq):
         count = deps.threshold if option.startswith("Первые") else int(option.split()[-1])
         result = actions.execute(Outcome("enqueue", {**action, "count": count}, action["category"]),
                                  deps.factory, deps.store, ask["msg_id"])
-        text, keyboard = intents.render("", [result])
+        results = [result]
+        if result.log_id is not None and (warning := workers.note(deps.factory)):
+            results.append(warning)
+        text, keyboard = intents.render("", results)
         deps.tg.send(chat_id, text, keyboard)
 
 
