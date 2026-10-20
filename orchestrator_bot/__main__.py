@@ -51,6 +51,10 @@ def main(argv=None) -> int:
     send = lambda text, keyboard=None: tg.send(settings.owner_chat_id, text, keyboard)  # noqa: E731
     server = make_server(store, factory, send, settings.api_token, settings.api_port, settings.doubt_threshold)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        tg.set_commands(bot.BOT_COMMANDS)              # меню команд у кнопки «Меню» рядом с полем ввода
+    except Exception:
+        logging.getLogger("orchestrator_bot").exception("setMyCommands")
     deps = bot.Deps(store=store, tg=tg, transcriber=Transcriber(settings.whisper_model), factory=factory,
                     owner_chat_id=settings.owner_chat_id, threshold=settings.doubt_threshold,
                     report_fn=lambda: _report_text(store, factory))

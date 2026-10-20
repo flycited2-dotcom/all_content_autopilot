@@ -17,9 +17,9 @@ class FakeTg:
         self.calls = []
         self._next_id = 100
 
-    def send(self, chat_id, text, keyboard=None):
+    def send(self, chat_id, text, keyboard=None, reply_keyboard=None):
         self._next_id += 1
-        self.calls.append(("send", chat_id, text, keyboard))
+        self.calls.append(("send", chat_id, text, keyboard, reply_keyboard))
         return self._next_id
 
     def edit(self, chat_id, message_id, text, keyboard=None):
@@ -151,14 +151,6 @@ def test_build_hint_uses_catalog_only():
     assert "Indesit" not in hint
 
 
-def test_menu_has_status_report_and_task_wizard_link(deps):
-    bot.handle_update(_msg("/menu"), deps)
-    keyboard = deps.tg.calls[-1][3]
-    buttons = [b for row in keyboard for b in row]
-    assert [b.get("callback_data") for b in buttons[:2]] == ["m:status", "m:report"]
-    assert buttons[2]["url"] == "https://t.me/Sendpr1ce_bot"
-
-
 def test_status_works_without_pc(deps):
     deps.store.heartbeat(NOW - 10_000)
     bot.handle_update(_msg("/status"), deps)
@@ -232,3 +224,34 @@ def test_status_has_no_start_button_when_agent_ready(deps):
     deps.factory.worker_state = {"generation": True, "agent_online": True, "last_seen": None, "lanes": [], "commands": {}}
     bot.handle_update(_msg("/status"), deps)
     assert not deps.tg.calls[-1][3]
+
+
+def test_menu_installs_persistent_reply_keyboard(deps):
+    bot.handle_update(_msg("/start"), deps)
+    reply_keyboard = deps.tg.calls[-1][4]
+    assert [b for row in reply_keyboard for b in row] == ["📋 Статус", "🧾 Сводка", "🛠 Мастер задач"]
+
+
+def test_reply_keyboard_buttons_work_without_queue(deps):
+    bot.handle_update(_msg("📋 Статус"), deps)
+    assert "📋 Статус" in deps.tg.texts()[-1] and "Конвейер" in deps.tg.texts()[-1]
+    bot.handle_update({"update_id": 3, "message": {"message_id": 6, "chat": {"id": OWNER}, "from": {"id": OWNER},
+                                                    "text": "🛠 Мастер задач"}}, deps)
+    assert deps.tg.calls[-1][3][0][0]["url"] == "https://t.me/Sendpr1ce_bot"
+    assert deps.store.count_new() == 0
+
+
+def test_telegram_api_reply_keyboard_and_commands():
+    seen = []
+
+    def handler(req):
+        seen.append((req.url.path, json.loads(req.content)))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1} if "send" in req.url.path else True})
+
+    api = TelegramApi("TOK", httpx.Client(transport=httpx.MockTransport(handler)))
+    api.send(OWNER, "x", reply_keyboard=[["📋 Статус"]])
+    markup = seen[-1][1]["reply_markup"]
+    assert markup["keyboard"] == [[{"text": "📋 Статус"}]] and markup["is_persistent"] and markup["resize_keyboard"]
+    api.set_commands([("status", "Статус")])
+    assert seen[-1][0] == "/botTOK/setMyCommands"
+    assert seen[-1][1]["commands"] == [{"command": "status", "description": "Статус"}]

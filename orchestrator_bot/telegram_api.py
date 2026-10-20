@@ -29,11 +29,17 @@ class TelegramApi:
             params["offset"] = offset
         return self._call("getUpdates", **params)
 
-    def send(self, chat_id, text, keyboard=None) -> int:
+    def send(self, chat_id, text, keyboard=None, reply_keyboard=None) -> int:
         params = {"chat_id": chat_id, "text": text[:_MAX_TEXT]}
         if keyboard:
             params["reply_markup"] = self._markup(keyboard)
+        elif reply_keyboard:                       # постоянные кнопки внизу чата (не уезжают с лентой)
+            params["reply_markup"] = {"keyboard": [[{"text": b} for b in row] for row in reply_keyboard],
+                                      "resize_keyboard": True, "is_persistent": True}
         return self._call("sendMessage", **params)["message_id"]
+
+    def set_commands(self, commands: list[tuple[str, str]]):
+        self._call("setMyCommands", commands=[{"command": c, "description": d} for c, d in commands])
 
     def edit(self, chat_id, message_id, text, keyboard=None):
         params = {"chat_id": chat_id, "message_id": message_id, "text": text[:_MAX_TEXT]}

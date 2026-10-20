@@ -64,11 +64,20 @@ def status_message(deps) -> tuple[str, list | None]:
     return text, (None if ready else [[workers.START_BUTTON]])     # остановлен — запуск одной кнопкой
 
 
+BTN_STATUS, BTN_REPORT, BTN_WIZARD = "📋 Статус", "🧾 Сводка", "🛠 Мастер задач"
+MAIN_KEYBOARD = [[BTN_STATUS, BTN_REPORT], [BTN_WIZARD]]
+BOT_COMMANDS = [("status", "Статус завода и контент-агента"), ("report", "Сводка за день"),
+                ("menu", "Показать кнопки")]
+
+
 def _menu(deps, chat_id):
-    keyboard = [[{"text": "📋 Статус", "callback_data": "m:status"},
-                 {"text": "🧾 Сводка", "callback_data": "m:report"}],
-                [{"text": "🛠 Мастер задач", "url": TASK_WIZARD_URL}]]
-    deps.tg.send(chat_id, "Что сделать? Можно просто написать или надиктовать задачу.", keyboard)
+    # постоянная клавиатура внизу чата — не уезжает с лентой, /start больше не нужен
+    deps.tg.send(chat_id, "Кнопки внизу. Задачу можно просто написать или надиктовать.",
+                 reply_keyboard=MAIN_KEYBOARD)
+
+
+def _wizard(deps, chat_id):
+    deps.tg.send(chat_id, "Мастер задач — в боте конвейера:", [[{"text": BTN_WIZARD, "url": TASK_WIZARD_URL}]])
 
 
 def _report(deps, chat_id):
@@ -167,10 +176,12 @@ def handle_update(update: dict, deps: Deps) -> None:
     command = text.split()[0].lower()
     if command in ("/start", "/menu"):
         _menu(deps, chat_id)
-    elif command == "/status":
+    elif command == "/status" or text == BTN_STATUS:
         deps.tg.send(chat_id, *status_message(deps))
-    elif command == "/report":
+    elif command == "/report" or text == BTN_REPORT:
         _report(deps, chat_id)
+    elif text == BTN_WIZARD:
+        _wizard(deps, chat_id)
     else:
         _queue(deps, chat_id, message["message_id"], "text", text)
 
