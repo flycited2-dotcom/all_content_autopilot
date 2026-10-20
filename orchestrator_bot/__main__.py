@@ -25,8 +25,14 @@ def _report_text(store, factory) -> str:
     return report.build_report(status, store.actions_since(since), store.last_heartbeat(), now)
 
 
-def main(argv=None) -> int:
+def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    for name in ("httpx", "httpcore"):            # их INFO пишет URL Bot API — а в нём токен бота
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def main(argv=None) -> int:
+    configure_logging()
     mode = (argv or sys.argv[1:] or ["run"])[0]
     settings = Settings.from_env()
     store = Store(settings.db_path)

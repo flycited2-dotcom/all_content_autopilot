@@ -50,3 +50,11 @@ def test_bot_unit_has_resource_limits():
     unit = (DEPLOY / "orchestrator-bot.service").read_text(encoding="utf-8")
     for key in ("MemoryMax=", "OOMScoreAdjust=", "Nice="):
         assert key in unit
+
+
+def test_logging_hides_http_request_urls_with_token():
+    import logging
+    from orchestrator_bot.__main__ import configure_logging
+    configure_logging()
+    for name in ("httpx", "httpcore"):
+        assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING
