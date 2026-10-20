@@ -39,6 +39,8 @@ def process_once(api, worker, turn, sess) -> bool:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    for name in ("httpx", "httpcore"):          # не писать каждый опрос раз в 3 с
+        logging.getLogger(name).setLevel(logging.WARNING)
     token = os.environ["ORCH_API_TOKEN"]
     api = ApiClient(os.environ.get("ORCH_API_URL", "http://127.0.0.1:8790"), token)
     tunnel = None
