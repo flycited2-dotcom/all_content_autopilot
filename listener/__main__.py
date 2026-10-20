@@ -44,7 +44,7 @@ def main() -> int:
     tunnel = None
     if os.environ.get("ORCH_TUNNEL_KEY"):
         tunnel = Tunnel(["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
-                         "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
+                         "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
                          "-i", os.environ["ORCH_TUNNEL_KEY"], "-p", os.environ.get("ORCH_SSH_PORT", "2222"),
                          "-L", "8790:127.0.0.1:8790", f"root@{os.environ.get('ORCH_SSH_HOST', '212.116.115.150')}"])
     worker = EditorialWorker(brain.run_with_kill, api.reply, root=ROOT)
