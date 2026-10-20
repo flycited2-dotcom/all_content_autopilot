@@ -61,7 +61,9 @@ class EditorialWorker:
         day = self.today()
         inbox = self.root / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
-        (inbox / "brief.md").write_text(action["brief"] + "\n", encoding="utf-8")
+        channels = ", ".join(action.get("channels") or [])
+        (inbox / "brief.md").write_text(action["brief"] + (f"\nКаналы: {channels}" if channels else "") + "\n",
+                                        encoding="utf-8")
         run_dir = self.root / "runs" / day
         run_dir.mkdir(parents=True, exist_ok=True)
         before = {p.name for p in (run_dir / "drafts").glob("*.json")}   # утренние черновики не пересылать

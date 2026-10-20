@@ -255,3 +255,19 @@ def test_telegram_api_reply_keyboard_and_commands():
     api.set_commands([("status", "Статус")])
     assert seen[-1][0] == "/botTOK/setMyCommands"
     assert seen[-1][1]["commands"] == [{"command": "status", "description": "Статус"}]
+
+
+def test_reply_to_draft_carries_draft_id_into_queue(deps):
+    update = _msg("короче и без примеров про Пермь")
+    update["message"]["reply_to_message"] = {"message_id": 99, "text": "📝 Тепловой насос\n\nТекст\n\nid: heat-pumps-basics-expert"}
+    bot.handle_update(update, deps)
+    queued = deps.store.claim_next(NOW)["text"]
+    assert "короче и без примеров про Пермь" in queued
+    assert "id: heat-pumps-basics-expert" in queued
+
+
+def test_voice_reply_to_draft_carries_draft_id(deps):
+    update = _msg(voice=True)
+    update["message"]["reply_to_message"] = {"message_id": 99, "text": "📝 Заголовок\n\nid: nasosy-v2"}
+    bot.handle_update(update, deps)
+    assert "id: nasosy-v2" in deps.store.claim_next(NOW)["text"]

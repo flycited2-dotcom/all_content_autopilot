@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -84,6 +85,13 @@ def _report(deps, chat_id):
     deps.tg.send(chat_id, deps.report_fn() if deps.report_fn else "Сводка пока недоступна")
 
 
+def _with_reply_context(message: dict, text: str) -> str:
+    """Ответ на черновик: id черновика («id: …» в конце его текста) едет в разговор с Claude."""
+    replied = (message.get("reply_to_message") or {}).get("text") or ""
+    found = re.findall(r"(?m)^id: ([A-Za-z0-9_-]{1,80})\s*$", replied)
+    return f"{text}\n[ответ на черновик id: {found[-1]}]" if found else text
+
+
 def _queue(deps, chat_id, tg_message_id, kind, text):
     if deps.store.add_message(tg_message_id, kind, text, now=deps.clock()) is None:
         return                                       # повторная доставка — уже в очереди
@@ -107,7 +115,7 @@ def _voice(deps, chat_id, message):
         deps.tg.edit(chat_id, mid, NOT_HEARD)
         return
     deps.tg.edit(chat_id, mid, f"🎙 Услышал: {text}")
-    _queue(deps, chat_id, message["message_id"], "voice", text)
+    _queue(deps, chat_id, message["message_id"], "voice", _with_reply_context(message, text))
 
 
 def _callback(deps, cq):
@@ -183,7 +191,7 @@ def handle_update(update: dict, deps: Deps) -> None:
     elif text == BTN_WIZARD:
         _wizard(deps, chat_id)
     else:
-        _queue(deps, chat_id, message["message_id"], "text", text)
+        _queue(deps, chat_id, message["message_id"], "text", _with_reply_context(message, text))
 
 
 def offline_alert(deps: Deps, now: float) -> None:
