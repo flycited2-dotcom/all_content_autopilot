@@ -240,3 +240,33 @@ def test_revise_marks_rejected_version(tmp_path):
     worker.join_idle(5)
     assert posted[-1].startswith("⚠️ Контролёр не принял")
     assert "вдвое" in posted[-1] and "Короче" in posted[-1]
+
+
+def test_interrupted_job_is_resumed_on_restart(tmp_path):
+    chat = tmp_path / "runs" / "chat"
+    chat.mkdir(parents=True)
+    (chat / "editorial-job.json").write_text(json.dumps({"type": "run_editorial", "brief": "насосы", "channels": []},
+                                                        ensure_ascii=False), encoding="utf-8")
+    ran, posted = [], []
+    worker = EditorialWorker(lambda cmd, **kw: ran.append(cmd) or SimpleNamespace(returncode=1, stdout="", stderr=""),
+                             lambda text, keyboard=None: posted.append(text), root=tmp_path, today=lambda: "2026-10-21")
+    worker.join_idle(5)
+    assert len(ran) == 1                                    # прерванное задание выполнено заново
+    assert any("прерван" in p for p in posted)
+    assert not (chat / "editorial-job.json").exists()       # после завершения отметка снята
+
+
+def test_job_marker_written_while_running(tmp_path):
+    started = threading.Event()
+    gate = threading.Event()
+
+    def runner(cmd, **kw):
+        started.set()
+        gate.wait(5)
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+    worker = EditorialWorker(runner, lambda text, keyboard=None: None, root=tmp_path, today=lambda: "2026-10-21")
+    worker.submit({"type": "run_editorial", "brief": "x", "channels": []})
+    assert started.wait(5)
+    assert (tmp_path / "runs" / "chat" / "editorial-job.json").exists()
+    gate.set()
+    worker.join_idle(5)

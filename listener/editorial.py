@@ -22,7 +22,19 @@ class EditorialWorker:
         self.jobs: queue.Queue = queue.Queue()
         self._idle = threading.Event()
         self._idle.set()
+        self.marker = self.root / "runs" / "chat" / "editorial-job.json"
+        interrupted = self._load_marker()
+        if interrupted:                              # слушатель перезапустили посреди задания — повторить
+            self._post("↻ Предыдущее редакционное задание было прервано перезапуском ПК-слушателя — выполняю заново")
+            self.submit(interrupted)
         threading.Thread(target=self._loop, daemon=True).start()
+
+    def _load_marker(self) -> dict | None:
+        try:
+            job = json.loads(self.marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return job if isinstance(job, dict) and job.get("type") in ("run_editorial", "revise_editorial") else None
 
     def submit(self, action: dict) -> None:
         self._idle.clear()
@@ -35,6 +47,8 @@ class EditorialWorker:
         while True:
             action = self.jobs.get()
             try:
+                self.marker.parent.mkdir(parents=True, exist_ok=True)
+                self.marker.write_text(json.dumps(action, ensure_ascii=False), encoding="utf-8")
                 if action["type"] == "run_editorial":
                     self._run_editorial(action)
                 elif action["type"] == "revise_editorial":
@@ -43,6 +57,10 @@ class EditorialWorker:
                 log.exception("редакционное задание не удалось")
                 self._post("❌ Редакционное задание не удалось — подробности в журнале ПК")
             finally:
+                try:
+                    self.marker.unlink()
+                except OSError:
+                    pass
                 if self.jobs.empty():
                     self._idle.set()
 
