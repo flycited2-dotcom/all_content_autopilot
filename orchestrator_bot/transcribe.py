@@ -18,7 +18,7 @@ def decode_ogg(data: bytes):
 
 def _whisper(size):
     from faster_whisper import WhisperModel
-    return WhisperModel(size, device="cpu", compute_type="int8")
+    return WhisperModel(size, device="cpu", compute_type="int8", cpu_threads=2)
 
 
 class Transcriber:

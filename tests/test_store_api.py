@@ -15,16 +15,21 @@ TOKEN = "t0ken"
 class FakeFactory:
     def __init__(self, total=2):
         self.total = total
+        self.hints = 0
+        self.fail_enqueue = False
         self.enqueued = []
         self.cancelled = []
 
     def hint(self):
+        self.hints += 1
         return {"brands": ["Beko", "Ресанта"], "sources": ["manual"]}
 
     def resolve(self, action):
-        return {"total_matches": self.total, "items": []}
+        return {"total_matches": self.total, "items": [{}] * self.total}
 
     def enqueue(self, action):
+        if self.fail_enqueue:
+            raise RuntimeError("database is locked")
         self.enqueued.append(action)
         return {"requested": 2, "accepted": ["excel|beko|x100", "excel|beko|x200"],
                 "items": [{"name": "Холодильник Beko X100"}, {"name": "Холодильник Beko X200"}], "due_at": None}
@@ -149,3 +154,41 @@ def test_unparseable_intent_is_rejected_without_burning_the_message(server):
     assert exc.value.code == 400
     out = _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent(count=2)})
     assert "duplicate" not in out and len(factory.enqueued) == 1
+
+
+def test_next_without_message_does_not_compute_hint(server):
+    store, factory, sent, base = server
+    assert _call(base, "GET", "/next")["message"] is None
+    assert factory.hints == 0
+
+
+def test_failed_action_reports_error_and_completes_message(server):
+    store, factory, sent, base = server
+    factory.fail_enqueue = True
+    msg = store.add_message(20, "text", "поставь")
+    out = _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent(count=2)})
+    assert out["ok"] is True
+    assert "❌" in sent[-1][0]
+    assert store.claim_next(now=10**10) is None              # сообщение завершено, а не зациклено
+
+
+def test_duplicate_replays_editorial_and_marks_done(server):
+    store, factory, sent, base = server
+    msg = store.add_message(21, "text", "сделай пост")
+    intent = {"reply": "Запускаю.", "actions": [{"type": "run_editorial", "brief": "насосы", "channels": []}]}
+    first = _call(base, "POST", "/intent", {"message_id": msg, "intent": intent})
+    again = _call(base, "POST", "/intent", {"message_id": msg, "intent": intent})
+    assert again["duplicate"] is True and again["editorial"] == first["editorial"]
+    assert store.claim_next(now=10**10) is None
+
+
+def test_send_failure_still_completes(tmp_path):
+    from orchestrator_bot.api import handle_intent
+    store = Store(tmp_path / "o.db")
+
+    def broken_send(text, kb=None):
+        raise RuntimeError("Telegram 429")
+    msg = store.add_message(22, "text", "x")
+    out = handle_intent(store, FakeFactory(), broken_send, msg, _enqueue_intent(count=2))
+    assert out["ok"] is True
+    assert store.claim_next(now=10**10) is None

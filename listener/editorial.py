@@ -7,6 +7,7 @@ import queue
 import re
 import subprocess
 import threading
+import time
 from datetime import date
 from pathlib import Path
 
@@ -40,10 +41,16 @@ class EditorialWorker:
                     self._revise(action)
             except Exception:
                 log.exception("редакционное задание не удалось")
-                self.post("❌ Редакционное задание не удалось — подробности в журнале ПК")
+                self._post("❌ Редакционное задание не удалось — подробности в журнале ПК")
             finally:
                 if self.jobs.empty():
                     self._idle.set()
+
+    def _post(self, text):
+        try:
+            self.post(text)
+        except Exception:                            # туннель/сервер недоступен — поток не должен умереть
+            log.exception("не удалось отправить в чат")
 
     def _claude(self, prompt):
         cmd = [claude_bin(), "-p", prompt, *SANDBOX, "--output-format", "json"]
@@ -58,23 +65,37 @@ class EditorialWorker:
         run_dir = self.root / "runs" / day
         run_dir.mkdir(parents=True, exist_ok=True)
         before = {p.name for p in (run_dir / "drafts").glob("*.json")}   # утренние черновики не пересылать
-        self._claude(f"/morning-run {day}")
+        started = time.time()
+        proc = self._claude(f"/morning-run {day}")
+        if proc.returncode != 0:
+            self._post(f"❌ Редакционный прогон не удался (код {proc.returncode}): {(proc.stderr or '')[-200:]}")
+            return
         summary = run_dir / "summary.md"
-        self.post(summary.read_text(encoding="utf-8") if summary.exists() else "Редакционный прогон завершён без итога")
+        if not summary.exists() or summary.stat().st_mtime < started:
+            self._post("❌ Редакционный прогон завершился без нового итога")
+            return
+        self._post(summary.read_text(encoding="utf-8"))
         for draft in sorted((run_dir / "drafts").glob("*.json")):
             if draft.name not in before and self._accepted(run_dir, draft.stem):
-                self.post(self._draft_text(draft))
+                self._post(self._draft_text(draft))
+
+    def _draft_day(self, draft_id) -> str:
+        found = sorted((self.root / "runs").glob(f"*/drafts/{draft_id}.json"))
+        return found[-1].parent.parent.name if found else self.today()
 
     def _revise(self, action):
-        day = self.today()
+        day = self._draft_day(action["draft_id"])        # ответ утром на вчерашний черновик
         notes = self.root / "runs" / "chat" / f"notes-{action['draft_id']}.txt"
         notes.parent.mkdir(parents=True, exist_ok=True)
         notes.write_text(action["notes"], encoding="utf-8")
-        self._claude(f"/revise-draft {day} {action['draft_id']} runs/chat/{notes.name}")
+        proc = self._claude(f"/revise-draft {day} {action['draft_id']} runs/chat/{notes.name}")
+        if proc.returncode != 0:
+            self._post(f"❌ Правка черновика не удалась (код {proc.returncode})")
+            return
         base = re.sub(r"-v\d+$", "", action["draft_id"])
         drafts = self.root / "runs" / day / "drafts"
         versions = sorted(drafts.glob(f"{base}-v*.json"), key=lambda p: int(p.stem.rsplit("-v", 1)[1]))
-        self.post(self._draft_text(versions[-1]) if versions else "❌ Новая версия черновика не появилась")
+        self._post(self._draft_text(versions[-1]) if versions else "❌ Новая версия черновика не появилась")
 
     @staticmethod
     def _accepted(run_dir, draft_id) -> bool:

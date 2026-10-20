@@ -44,3 +44,9 @@ def test_units_have_no_direct_shell_scripts():
     for unit in units:
         for command in re.findall(r"^Exec\w+=[-@:+!]*(\S+)", unit.read_text(encoding="utf-8"), re.M):
             assert not command.endswith(".sh"), f"{unit.name}: {command}"
+
+
+def test_bot_unit_has_resource_limits():
+    unit = (DEPLOY / "orchestrator-bot.service").read_text(encoding="utf-8")
+    for key in ("MemoryMax=", "OOMScoreAdjust=", "Nice="):
+        assert key in unit

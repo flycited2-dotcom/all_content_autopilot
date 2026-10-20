@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 ACTION_TYPES = ("enqueue_products", "cancel", "run_editorial", "revise_editorial", "ask")
-_TIME = re.compile(r"^\d{1,2}:\d{2}$")
+_TIME = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+_DRAFT_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _ISO_DAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
@@ -83,8 +84,9 @@ def normalize(intent: dict) -> tuple[str, list[dict]]:
                      "channels": [c for c in action.get("channels") or [] if c in ("tg_editorial", "vk_editorial")]}
             clean = clean if clean["brief"] else None
         elif kind == "revise_editorial":
-            clean = ({"type": "revise_editorial", "draft_id": str(action["draft_id"]), "notes": str(action.get("notes") or "")}
-                     if action.get("draft_id") and action.get("notes") else None)
+            draft_id = str(action.get("draft_id") or "")
+            clean = ({"type": "revise_editorial", "draft_id": draft_id, "notes": str(action.get("notes") or "")}
+                     if _DRAFT_ID.match(draft_id) and action.get("notes") else None)
         else:
             options = [str(o) for o in action.get("options") or []]
             clean = {"type": "ask", "question": str(action.get("question") or ""), "options": options} \
@@ -119,12 +121,13 @@ def plan(actions: list[dict], resolve: Callable[[dict], dict], threshold: int = 
             continue
         found = resolve(action)
         total = int(found.get("total_matches") or 0)
+        selected = len(found.get("items") or [])          # сколько реально поставится с учётом квот
         if total == 0:
             outcomes.append(Outcome("not_found", action, f"Не нашёл в наличии: «{action['category']}»"))
-        elif action["count"] is None and total > threshold:
+        elif action["count"] is None and selected > threshold:
             outcomes.append(Outcome("ask", action,
-                                    f"По «{action['category']}» нашлось {total} позиций — сколько ставить?",
-                                    options=[f"Первые {threshold}", f"Все {total}", "Отмена"], matches=total))
+                                    f"По «{action['category']}» нашлось {selected} позиций — сколько ставить?",
+                                    options=[f"Первые {threshold}", f"Все {selected}", "Отмена"], matches=selected))
         else:
             outcomes.append(Outcome("enqueue", action, action["category"], matches=total))
     return outcomes
@@ -138,7 +141,7 @@ def render(reply: str, results: list[Result]) -> tuple[str, list[list[dict]]]:
             lines.append(result.text)
         if result.log_id is not None:
             keyboard.append([{"text": "Отменить", "callback_data": f"c:{result.log_id}"}])
-        if result.ask_id is not None:
+        if result.ask_id is not None and result.outcome.options:
             keyboard.append([{"text": option, "callback_data": f"a:{result.ask_id}:{n}"}
                              for n, option in enumerate(result.outcome.options)])
     return "\n".join(lines), keyboard

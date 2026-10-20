@@ -42,7 +42,7 @@ def test_plan_not_found_when_zero_matches():
 
 
 def test_plan_asks_when_all_and_too_many():
-    [o] = intents.plan([_enqueue()], lambda a: {"total_matches": 57, "items": []})
+    [o] = intents.plan([_enqueue()], lambda a: {"total_matches": 57, "items": [{}] * 57})
     assert o.kind == "ask"
     assert o.options == ["Первые 40", "Все 57", "Отмена"]
     assert o.matches == 57
@@ -66,3 +66,20 @@ def test_render_adds_cancel_and_ask_buttons():
     assert text.splitlines()[0] == "Готово."
     assert "Поставил: 3 позиции" in text
     assert [b["callback_data"] for row in keyboard for b in row] == ["c:7", "a:3:0", "a:3:1"]
+
+
+def test_plan_no_doubt_with_numeric_quotas():
+    # «3 холодильника Beko» без count: выбирается 3, хотя категория большая — не переспрашивать
+    action = dict(_enqueue(), quotas={"beko": 3})
+    [o] = intents.plan([action], lambda a: {"total_matches": 120, "items": [{}] * 3})
+    assert o.kind == "enqueue"
+
+
+def test_normalize_rejects_bad_time_and_draft_id():
+    _, actions = intents.normalize({"actions": [
+        {"type": "enqueue_products", "category": "x", "at": "25:99"},
+        {"type": "revise_editorial", "draft_id": "../../x", "notes": "короче"},
+        {"type": "revise_editorial", "draft_id": "nasosy-v2", "notes": "короче"},
+    ]})
+    assert actions[0]["at"] is None
+    assert [a.get("draft_id") for a in actions[1:]] == ["nasosy-v2"]

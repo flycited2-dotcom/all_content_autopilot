@@ -177,3 +177,23 @@ def test_telegram_api_send_builds_inline_keyboard():
     mid = api.send(OWNER, "привет", [[{"text": "Отменить", "callback_data": "c:1"}]])
     assert mid == 77 and seen["path"] == "/botTOK/sendMessage"
     assert seen["body"]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "c:1"
+
+
+def test_same_update_twice_queued_once(deps):
+    bot.handle_update(_msg("поставь"), deps)
+    bot.handle_update(_msg("поставь"), deps)
+    assert deps.store.count_new() == 1
+
+
+def test_process_updates_persists_offset(deps):
+    bot.process_updates([{**_msg("раз"), "update_id": 41}, {**_msg("два"), "update_id": 42}], deps)
+    assert deps.store.get_meta("tg_offset") == "43"
+
+
+def test_cancel_works_even_if_answer_callback_fails(deps):
+    def broken(*a, **k):
+        raise RuntimeError("query is too old")
+    deps.tg.answer_callback = broken
+    log_id = deps.store.log_action(1, "enqueue", {"category": "x"}, {"accepted": ["k1"]})
+    bot.handle_update(_cb(f"c:{log_id}"), deps)
+    assert deps.factory.cancelled == [["k1"]]

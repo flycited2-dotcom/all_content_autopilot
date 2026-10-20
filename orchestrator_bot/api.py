@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from orchestrator_bot import actions, intents
+from orchestrator_bot.intents import Outcome, Result
+
+log = logging.getLogger("orchestrator_bot")
+EDITORIAL = ("run_editorial", "revise_editorial")
 
 
 def start_of_day(now: float) -> float:
@@ -17,13 +22,37 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
     intent = intents.parse_intent(raw_intent) if isinstance(raw_intent, str) else raw_intent
     reply, acts = intents.normalize(intent)          # разбор до отметки: битое намерение не «сжигает» сообщение
     if not store.mark_intent(msg_id):
-        return {"ok": True, "duplicate": True}
-    outcomes = intents.plan(acts, factory.resolve, threshold)
-    results = [actions.execute(o, factory, store, msg_id) for o in outcomes]
+        store.mark_done(msg_id)                      # повтор после потерянного ответа — не зацикливать
+        return {**(store.get_response(msg_id) or {"ok": True, "editorial": []}), "duplicate": True}
+    results, editorial = [], []
+    for action in acts:
+        try:
+            outcomes = intents.plan([action], factory.resolve, threshold)
+        except Exception as exc:
+            log.exception("разбор действия %s", action.get("type"))
+            results.append(Result(Outcome("error", action, ""), _failed(action.get("category") or action["type"], exc)))
+            continue
+        for outcome in outcomes:
+            try:
+                results.append(actions.execute(outcome, factory, store, msg_id))
+                if outcome.kind in EDITORIAL:
+                    editorial.append(outcome.action)
+            except Exception as exc:
+                log.exception("исполнение %s", outcome.kind)
+                results.append(Result(outcome, _failed(outcome.text or outcome.kind, exc)))
     text, keyboard = intents.render(reply, results)
-    send(text or "Принял.", keyboard)
+    try:
+        send(text or "Принял.", keyboard)
+    except Exception:
+        log.exception("ответ владельцу не отправлен")
+    response = {"ok": True, "editorial": editorial}
+    store.save_response(msg_id, response)
     store.mark_done(msg_id)
-    return {"ok": True, "editorial": [o.action for o in outcomes if o.kind in ("run_editorial", "revise_editorial")]}
+    return response
+
+
+def _failed(what, exc) -> str:
+    return f"❌ Не удалось: {what} — {exc.__class__.__name__}: {str(exc)[:200]}"
 
 
 def make_server(store, factory, send, token, port, threshold=40, clock=time.time) -> ThreadingHTTPServer:
@@ -56,10 +85,12 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
                 return self._json(404, {"error": "not found"})
             now = clock()
             message = store.claim_next(now)
-            try:
-                hint = factory.hint()
-            except Exception:
-                hint = {}
+            hint = {}
+            if message:                                 # каталог нужен только для настоящего сообщения
+                try:
+                    hint = factory.hint()
+                except Exception:
+                    log.exception("подсказка каталога")
             self._json(200, {"message": message, "context": {"hint": hint, "today": store.actions_since(start_of_day(now))}})
 
         def do_POST(self):
@@ -85,6 +116,9 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
                                                          body["intent"], threshold))
             except (KeyError, ValueError) as exc:
                 return self._json(400, {"error": str(exc)})
+            except Exception as exc:
+                log.exception("API %s", self.path)
+                return self._json(500, {"error": exc.__class__.__name__})
             self._json(404, {"error": "not found"})
 
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)

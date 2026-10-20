@@ -69,7 +69,8 @@ def _report(deps, chat_id):
 
 
 def _queue(deps, chat_id, tg_message_id, kind, text):
-    deps.store.add_message(tg_message_id, kind, text, now=deps.clock())
+    if deps.store.add_message(tg_message_id, kind, text, now=deps.clock()) is None:
+        return                                       # повторная доставка — уже в очереди
     hb = deps.store.last_heartbeat()
     if hb is None or deps.clock() - hb > deps.heartbeat_stale_after:
         deps.tg.send(chat_id, OFFLINE_NOTICE)
@@ -96,7 +97,10 @@ def _voice(deps, chat_id, message):
 def _callback(deps, cq):
     chat_id = cq["message"]["chat"]["id"]
     data = cq.get("data") or ""
-    deps.tg.answer_callback(cq["id"])
+    try:
+        deps.tg.answer_callback(cq["id"])
+    except Exception:                                # «query is too old» — кнопку всё равно исполняем
+        log.info("answerCallbackQuery не прошёл", exc_info=True)
     if data == "m:status":
         deps.tg.send(chat_id, status_text(deps))
     elif data == "m:report":
@@ -137,6 +141,8 @@ def handle_update(update: dict, deps: Deps) -> None:
     chat_id = message.get("chat", {}).get("id")
     if chat_id != deps.owner_chat_id or message.get("from", {}).get("id") != deps.owner_chat_id:
         return
+    if deps.store.has_tg_message(message.get("message_id")):
+        return                                       # повторная доставка после перезапуска
     if message.get("voice"):
         _voice(deps, chat_id, message)
         return
@@ -166,19 +172,21 @@ def offline_alert(deps: Deps, now: float) -> None:
     deps.store.set_meta("offline_alert", str(now))
 
 
+def process_updates(updates: list[dict], deps: Deps) -> None:
+    for update in updates:
+        try:
+            handle_update(update, deps)
+        except Exception:
+            log.exception("обработка обновления %s", update.get("update_id"))
+        deps.store.set_meta("tg_offset", str(update["update_id"] + 1))   # переживает перезапуск
+
+
 def run_forever(deps: Deps) -> None:
-    offset = None
     while True:
         try:
-            updates = deps.tg.get_updates(offset)
+            offset = deps.store.get_meta("tg_offset")
+            process_updates(deps.tg.get_updates(int(offset) if offset else None), deps)
+            offline_alert(deps, deps.clock())
         except Exception:
-            log.exception("getUpdates")
+            log.exception("цикл бота")
             time.sleep(5)
-            continue
-        for update in updates:
-            offset = update["update_id"] + 1
-            try:
-                handle_update(update, deps)
-            except Exception:
-                log.exception("обработка обновления %s", update.get("update_id"))
-        offline_alert(deps, deps.clock())

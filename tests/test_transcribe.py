@@ -71,3 +71,20 @@ def test_factory_raises_on_nonzero_exit():
     f = Factory("/venv/python", "/opt/cf", runner=_runner([], stdout='{"error": "x"}', code=2))
     with pytest.raises(FactoryError):
         f.hint()
+
+
+def test_factory_sets_pythonpath_to_src():
+    record = []
+    Factory("/venv/python", "/opt/cf", runner=_runner(record)).status(0)
+    assert record[0][1]["env"]["PYTHONPATH"] == "/opt/cf/src"
+
+
+def test_factory_hint_cached_for_ttl():
+    record, now = [], [1000.0]
+    f = Factory("/venv/python", "/opt/cf", runner=_runner(record, stdout='{"brands": []}'), clock=lambda: now[0])
+    f.hint()
+    f.hint()
+    assert len(record) == 1
+    now[0] += 601
+    f.hint()
+    assert len(record) == 2

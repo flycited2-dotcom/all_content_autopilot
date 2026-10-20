@@ -12,7 +12,8 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY, tg_message_id INTEGER, kind TEXT, text TEXT,
     status TEXT NOT NULL DEFAULT 'new', created REAL, claimed_at REAL,
-    intent_done INTEGER NOT NULL DEFAULT 0);
+    intent_done INTEGER NOT NULL DEFAULT 0, response TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_messages_tg ON messages(tg_message_id) WHERE tg_message_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS actions_log (
     id INTEGER PRIMARY KEY, msg_id INTEGER, kind TEXT, payload TEXT, result TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS asks (
@@ -34,10 +35,25 @@ class Store:
         return _Closing(db)
 
     # ── очередь ──
-    def add_message(self, tg_message_id, kind, text, now=None) -> int:
+    def add_message(self, tg_message_id, kind, text, now=None) -> int | None:
+        """None — это сообщение Telegram уже в очереди (повторная доставка после перезапуска)."""
         with self._c() as db:
-            return db.execute("INSERT INTO messages(tg_message_id, kind, text, created) VALUES(?,?,?,?)",
-                              (tg_message_id, kind, text, now or time.time())).lastrowid
+            cur = db.execute("INSERT OR IGNORE INTO messages(tg_message_id, kind, text, created) VALUES(?,?,?,?)",
+                             (tg_message_id, kind, text, now or time.time()))
+            return cur.lastrowid if cur.rowcount == 1 else None
+
+    def has_tg_message(self, tg_message_id) -> bool:
+        with self._c() as db:
+            return db.execute("SELECT 1 FROM messages WHERE tg_message_id=?", (tg_message_id,)).fetchone() is not None
+
+    def save_response(self, msg_id, response: dict):
+        with self._c() as db:
+            db.execute("UPDATE messages SET response=? WHERE id=?", (json.dumps(response, ensure_ascii=False), msg_id))
+
+    def get_response(self, msg_id) -> dict | None:
+        with self._c() as db:
+            row = db.execute("SELECT response FROM messages WHERE id=?", (msg_id,)).fetchone()
+        return json.loads(row[0]) if row and row[0] else None
 
     def set_transcript(self, msg_id, text):
         with self._c() as db:

@@ -9,6 +9,10 @@ EnvironmentFile=/opt/agents-my/.env
 ExecStart=/opt/agents-my/.venv/bin/python -m orchestrator_bot run
 Restart=always
 RestartSec=5
+# общий VPS с content-factory: при нехватке памяти жертвуем ботом, а не cf-bot
+MemoryMax=1500M
+OOMScoreAdjust=500
+Nice=10
 
 [Install]
 WantedBy=multi-user.target

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 
 from orchestrator_bot.intents import due_text
 
@@ -11,14 +13,22 @@ class FactoryError(RuntimeError):
     pass
 
 
+HINT_TTL = 600            # подсказка из каталога: разбор всех прайсов дорогой, держим 10 минут
+
+
 class Factory:
-    def __init__(self, cf_python: str, cf_root: str, runner=subprocess.run, timeout: int = 120):
+    def __init__(self, cf_python: str, cf_root: str, runner=subprocess.run, timeout: int = 120,
+                 clock=time.time):
         self.cf_python, self.cf_root, self.runner, self.timeout = cf_python, cf_root, runner, timeout
+        self.clock = clock
+        self._hint: tuple[float, dict] | None = None
 
     def _run(self, *args) -> dict:
         cmd = [self.cf_python, "-m", "content_factory.agent_cli", *args]
+        # content-factory не установлен пакетом: его юниты задают PYTHONPATH=<root>/src — делаем так же
+        env = {**os.environ, "PYTHONPATH": f"{self.cf_root}/src"}
         proc = self.runner(cmd, cwd=self.cf_root, capture_output=True, text=True,
-                           encoding="utf-8", timeout=self.timeout)
+                           encoding="utf-8", timeout=self.timeout, env=env)
         if proc.returncode != 0:
             raise FactoryError(f"agent_cli {args[0]}: код {proc.returncode}: {(proc.stderr or proc.stdout or '')[-300:]}")
         try:
@@ -38,7 +48,10 @@ class Factory:
         return args
 
     def hint(self) -> dict:
-        return self._run("hint")
+        now = self.clock()
+        if self._hint is None or now - self._hint[0] > HINT_TTL:
+            self._hint = (now, self._run("hint"))
+        return self._hint[1]
 
     def resolve(self, action: dict) -> dict:
         return self._run("resolve", *self._select_args(action))

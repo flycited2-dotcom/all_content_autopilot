@@ -123,7 +123,8 @@ def test_second_run_same_day_posts_only_new_drafts(tmp_path):
     (day / "drafts" / "old.json").write_text('{"id": "old", "title": "Утро", "text": "Старый"}', encoding="utf-8")
     (day / "verdicts" / "old.json").write_text('{"ok": true}', encoding="utf-8")
 
-    def runner(cmd, **kw):                                 # прогон создаёт новый принятый черновик
+    def runner(cmd, **kw):                                 # прогон создаёт итог и новый принятый черновик
+        (day / "summary.md").write_text("Вечерний итог", encoding="utf-8")
         (day / "drafts" / "new.json").write_text('{"id": "new", "title": "Вечер", "text": "Новый"}', encoding="utf-8")
         (day / "verdicts" / "new.json").write_text('{"ok": true}', encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="{}", stderr="")
@@ -135,3 +136,61 @@ def test_second_run_same_day_posts_only_new_drafts(tmp_path):
     worker.join_idle(5)
     assert any("Новый" in p for p in posted)
     assert not any("Старый" in p for p in posted)
+
+
+def test_run_with_kill_enforces_timeout():
+    import subprocess
+    import sys
+    import time
+    from listener.brain import run_with_kill
+    started = time.time()
+    try:
+        run_with_kill([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("ожидался TimeoutExpired")
+    assert time.time() - started < 10
+
+
+def test_worker_survives_post_failure(tmp_path):
+    def post(text, keyboard=None):
+        raise RuntimeError("туннель упал")
+    ran = []
+    worker = EditorialWorker(lambda cmd, **kw: ran.append(cmd) or SimpleNamespace(returncode=0, stdout="{}", stderr=""),
+                             post, root=tmp_path, today=lambda: "2026-10-21")
+    worker.submit({"type": "run_editorial", "brief": "раз", "channels": []})
+    worker.join_idle(5)
+    worker.submit({"type": "run_editorial", "brief": "два", "channels": []})
+    worker.join_idle(5)
+    assert len(ran) == 2
+
+
+def test_failed_editorial_run_reports_error_not_stale_summary(tmp_path):
+    day = tmp_path / "runs" / "2026-10-21"
+    day.mkdir(parents=True)
+    (day / "summary.md").write_text("Утренний итог", encoding="utf-8")
+    posted = []
+    worker = EditorialWorker(lambda cmd, **kw: SimpleNamespace(returncode=1, stdout="", stderr="limit"),
+                             lambda text, keyboard=None: posted.append(text), root=tmp_path, today=lambda: "2026-10-21")
+    worker.submit({"type": "run_editorial", "brief": "x", "channels": []})
+    worker.join_idle(5)
+    assert posted and "❌" in posted[0] and "Утренний итог" not in posted[0]
+
+
+def test_revise_finds_draft_from_previous_day(tmp_path):
+    old = tmp_path / "runs" / "2026-10-20" / "drafts"
+    old.mkdir(parents=True)
+    (old / "nasosy.json").write_text('{"id": "nasosy", "title": "t", "text": "x"}', encoding="utf-8")
+    seen = []
+
+    def runner(cmd, **kw):
+        seen.append(cmd)
+        (old / "nasosy-v2.json").write_text('{"id": "nasosy-v2", "title": "Новый", "text": "Короче"}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+    posted = []
+    worker = EditorialWorker(runner, lambda text, keyboard=None: posted.append(text), root=tmp_path, today=lambda: "2026-10-21")
+    worker.submit({"type": "revise_editorial", "draft_id": "nasosy", "notes": "короче"})
+    worker.join_idle(5)
+    assert "/revise-draft 2026-10-20 nasosy" in seen[0][2]
+    assert "Короче" in posted[-1]
