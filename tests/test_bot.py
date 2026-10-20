@@ -220,3 +220,15 @@ def test_start_button_starts_workers(deps):
 def test_status_shows_content_agent_state(deps):
     bot.handle_update(_msg("/status"), deps)
     assert "генерация выключена" in deps.tg.texts()[-1]
+
+
+def test_status_offers_start_button_when_agent_not_ready(deps):
+    bot.handle_update(_msg("/status"), deps)
+    keyboard = deps.tg.calls[-1][3]
+    assert keyboard and keyboard[0][0]["callback_data"] == "w:start"
+
+
+def test_status_has_no_start_button_when_agent_ready(deps):
+    deps.factory.worker_state = {"generation": True, "agent_online": True, "last_seen": None, "lanes": [], "commands": {}}
+    bot.handle_update(_msg("/status"), deps)
+    assert not deps.tg.calls[-1][3]

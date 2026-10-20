@@ -47,19 +47,21 @@ def _pc_line(deps, now) -> str:
     return "ПК: не на связи" + (time.strftime(" с %H:%M %d.%m", time.localtime(hb)) if hb else "")
 
 
-def status_text(deps) -> str:
+def status_message(deps) -> tuple[str, list | None]:
     now = deps.clock()
     try:
         by_status = deps.factory.status(start_of_day(now)).get("by_status", {})
         pipeline = ", ".join(f"{k}: {v}" for k, v in sorted(by_status.items())) or "пусто"
     except Exception as exc:                        # content-factory недоступен — всё равно отвечаем
         pipeline = f"недоступен ({exc.__class__.__name__})"
+    ready = True
     try:
-        agent = workers.readiness(deps.factory.workers())[1]
+        ready, agent = workers.readiness(deps.factory.workers())
     except Exception as exc:
         agent = f"Контент-агент: не удалось проверить ({exc.__class__.__name__})"
-    return (f"📋 Статус\nКонвейер: {pipeline}\n{agent}\n{_pc_line(deps, now)}\n"
+    text = (f"📋 Статус\nКонвейер: {pipeline}\n{agent}\n{_pc_line(deps, now)}\n"
             f"В очереди к ПК: {deps.store.count_new()}")
+    return text, (None if ready else [[workers.START_BUTTON]])     # остановлен — запуск одной кнопкой
 
 
 def _menu(deps, chat_id):
@@ -107,7 +109,7 @@ def _callback(deps, cq):
     except Exception:                                # «query is too old» — кнопку всё равно исполняем
         log.info("answerCallbackQuery не прошёл", exc_info=True)
     if data == "m:status":
-        deps.tg.send(chat_id, status_text(deps))
+        deps.tg.send(chat_id, *status_message(deps))
     elif data == "m:report":
         _report(deps, chat_id)
     elif data == "w:start":
@@ -166,7 +168,7 @@ def handle_update(update: dict, deps: Deps) -> None:
     if command in ("/start", "/menu"):
         _menu(deps, chat_id)
     elif command == "/status":
-        deps.tg.send(chat_id, status_text(deps))
+        deps.tg.send(chat_id, *status_message(deps))
     elif command == "/report":
         _report(deps, chat_id)
     else:
