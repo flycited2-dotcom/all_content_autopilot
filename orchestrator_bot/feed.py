@@ -46,6 +46,8 @@ def digest(factory, store) -> tuple[str, list] | None:
         keyboard.append([{"text": f"🧹 Снять устаревшие ({tg['stale']})", "callback_data": "f:old"}])
     if feed.get("review_url"):
         keyboard.append([{"text": "👀 Смотреть по одному", "url": feed["review_url"]}])
+    elif tg["pending"] or vk:                       # старая группа проверки — ссылок на неё Telegram не даёт
+        lines.append("👀 По одному — в группе проверки @Sendpr1ce_bot, там же кнопки ✅/❌.")
     return "\n".join(lines), keyboard
 
 
