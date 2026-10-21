@@ -223,7 +223,7 @@ def test_status_offers_start_button_when_agent_not_ready(deps):
 def test_status_has_no_start_button_when_agent_ready(deps):
     deps.factory.worker_state = {"generation": True, "agent_online": True, "last_seen": None, "lanes": [], "commands": {}}
     bot.handle_update(_msg("/status"), deps)
-    assert not deps.tg.calls[-1][3]
+    assert deps.tg.calls[-1][3] == [[{"text": "🗂 Лента", "callback_data": "f:show"}]]   # без «Запустить»
 
 
 def test_menu_installs_persistent_reply_keyboard(deps):
@@ -333,3 +333,46 @@ def test_restore_button_after_accidental_cancel(deps):
     bot.handle_update(_cb(f"u:{log_id}"), deps)
     assert deps.factory.enqueued[-1]["category"] == "кондиционеры"
     assert "Поставил" in deps.tg.texts()[-1]
+
+
+class FeedFactory(FakeFactory):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def feed(self):
+        return {"tg": {"fresh": 3, "stale": 553, "pending": 560, "queued": 0}, "vk_review": 8,
+                "review_url": "https://t.me/c/1/999999999", "fresh_hours": 72, "stale_days": 7}
+
+    def approve_fresh(self):
+        self.calls.append("tg")
+        return {"queued": 3}
+
+    def publish_next(self):
+        self.calls.append("next")
+        return {"published": "k", "left": 2}
+
+
+def test_feed_digest_buttons_and_actions(deps):
+    deps.factory = FeedFactory()
+    bot.handle_update(_cb("f:show"), deps)
+    send = [c for c in deps.tg.calls if c[0] == "send"][-1]
+    assert "свежих 3" in send[2] and "устаревших (старше 7 дн.) — 553" in send[2] and "ВК-план на проверке: 8" in send[2]
+    assert [row[0].get("callback_data") for row in send[3]] == ["f:tg", "f:vk", "f:old", None]
+    bot.handle_update(_cb("f:tg"), deps)
+    assert deps.factory.calls == ["tg"] and "В очереди: 3" in deps.tg.texts()[-1]
+
+
+def test_feed_tick_digest_once_and_queue_every_30_min(deps):
+    from datetime import datetime
+    from orchestrator_bot import feed
+    deps.factory = FeedFactory()
+    t0 = datetime(2026, 10, 22, 9, 31).timestamp()
+    feed.tick(deps, t0)
+    feed.tick(deps, t0 + 60)
+    assert sum("Ждут вашего решения" in t for t in deps.tg.texts()) == 1
+    assert deps.factory.calls == ["next"]                       # вторая публикация — не раньше 30 минут
+    feed.tick(deps, t0 + 1801)
+    assert deps.factory.calls == ["next", "next"]
+    feed.tick(deps, datetime(2026, 10, 22, 22, 0).timestamp())  # ночью очередь стоит
+    assert deps.factory.calls == ["next", "next"]

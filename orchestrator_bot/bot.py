@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from orchestrator_bot import actions, drafts, intents, workers
+from orchestrator_bot import actions, drafts, feed, intents, workers
 from orchestrator_bot.api import start_of_day
 from orchestrator_bot.intents import Outcome
 
@@ -66,7 +66,8 @@ def status_message(deps) -> tuple[str, list | None]:
         agent = f"Контент-агент: не удалось проверить ({exc.__class__.__name__})"
     text = (f"📋 Статус\nКонвейер: {pipeline}\n{agent}\n{_pc_line(deps, now)}\n"
             f"В очереди к ПК: {deps.store.count_new()}{drafts_line(deps.store.drafts_summary(start_of_day(now)))}")
-    return text, (None if ready else [[workers.START_BUTTON]])     # остановлен — запуск одной кнопкой
+    keyboard = [[feed.FEED_BUTTON]] if ready else [[workers.START_BUTTON], [feed.FEED_BUTTON]]  # остановлен — запуск
+    return text, keyboard
 
 
 def drafts_line(summary: dict) -> str:
@@ -172,6 +173,14 @@ def _callback(deps, cq):
             deps.tg.send(chat_id, workers.start(deps.factory))
         except Exception as exc:
             deps.tg.send(chat_id, f"❌ Запустить не удалось: {exc.__class__.__name__}")
+    elif data == "f:show":
+        found = feed.digest(deps.factory, deps.store)
+        deps.tg.send(chat_id, *(found or ("🗂 Решать сейчас нечего — всё разобрано.", None)))
+    elif data in ("f:tg", "f:vk", "f:old"):
+        try:
+            deps.tg.send(chat_id, feed.act(deps.factory, data[2:]))
+        except Exception as exc:
+            deps.tg.send(chat_id, f"❌ Не получилось: {exc.__class__.__name__}")
     elif data.startswith("d:"):                      # этап 3: черновик — опубликовать / отклонить / ещё картинку
         _, op, n = data.split(":")
         if op == "p":
@@ -288,6 +297,7 @@ def run_forever(deps: Deps) -> None:
             process_updates(deps.tg.get_updates(int(offset) if offset else None), deps)
             offline_alert(deps, deps.clock())
             poll_drafts(deps, deps.clock())
+            feed.tick(deps, deps.clock())
         except Exception:
             log.exception("цикл бота")
             time.sleep(5)

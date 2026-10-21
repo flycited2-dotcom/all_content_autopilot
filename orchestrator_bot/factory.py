@@ -76,6 +76,22 @@ class Factory:
     def status(self, since: float) -> dict:
         return self._run("status", "--since", str(since))
 
+    # ── единая лента ──
+    def feed(self) -> dict:
+        return self._run("feed")
+
+    def approve_fresh(self) -> dict:
+        return self._run("approve-fresh")
+
+    def expire_stale(self) -> dict:
+        return self._run("expire-stale")
+
+    def vk_approve(self) -> dict:
+        return self._run("vk-approve")
+
+    def publish_next(self) -> dict:
+        return self._run("publish-next")
+
     # ── этап 3: посты оркестратора ──
     def visual_submit(self, scene: str, request_key: str, new: bool = False) -> dict:
         return self._run("visual-submit", "--scene", scene, "--request-key", request_key, *(["--new"] if new else []))
