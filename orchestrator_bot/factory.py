@@ -49,6 +49,7 @@ class Factory:
             args += ["--btu", "-".join(str(b) for b in action["btu"])]
         if action.get("min_temp"):
             args += ["--min-temp", str(action["min_temp"])]
+        args += [f"--{flag.replace('_', '-')}" for flag in ("inverter", "heat_pump", "full_dc") if action.get(flag)]
         return args
 
     def hint(self) -> dict:

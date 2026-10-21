@@ -74,6 +74,9 @@ def _enqueue(action: dict) -> dict | None:
         clean["btu"] = sorted(btu)
     if isinstance(frost, int) and 5 <= frost <= 40:
         clean["min_temp"] = frost
+    for flag in ("inverter", "heat_pump", "full_dc"):  # тип кондиционера — только явно сказанный
+        if action.get(flag) is True:
+            clean[flag] = True
     return clean
 
 

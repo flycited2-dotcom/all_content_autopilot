@@ -104,3 +104,11 @@ def test_factory_passes_spec_filters():
     from orchestrator_bot.factory import Factory
     args = Factory._select_args({"category": "кондиционеры", "btu": [9, 12], "min_temp": 20})
     assert args[-4:] == ["--btu", "9-12", "--min-temp", "20"]
+
+
+def test_ac_type_flags_pass_to_factory():
+    from orchestrator_bot.factory import Factory
+    _, acts = intents.normalize({"actions": [{"type": "enqueue_products", "category": "кондиционеры",
+                                              "inverter": True, "heat_pump": True, "full_dc": "да"}]})
+    assert acts[0]["inverter"] and acts[0]["heat_pump"] and "full_dc" not in acts[0]
+    assert Factory._select_args(acts[0])[-2:] == ["--inverter", "--heat-pump"]
