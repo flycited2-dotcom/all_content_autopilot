@@ -125,7 +125,7 @@ def test_intent_with_doubt_saves_ask_with_buttons(server):
     msg = store.add_message(12, "text", "все холодильники")
     _call(base, "POST", "/intent", {"message_id": msg, "intent": _enqueue_intent()})
     text, kb = sent[-1]
-    assert [b["callback_data"].rsplit(":", 1)[1] for b in kb[0]] == ["0", "1", "2"]
+    assert [row[0]["callback_data"].rsplit(":", 1)[1] for row in kb] == ["0", "1", "2"]   # по кнопке в строке
     assert "57" in text
     assert factory.enqueued == []
 

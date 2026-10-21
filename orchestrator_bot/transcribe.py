@@ -30,6 +30,25 @@ class Transcriber:
     def __call__(self, ogg: bytes, hint: str) -> str:
         if self._model is None:
             self._model = self.model_factory(self.model_size)
+        # condition_on_previous_text=False: иначе на длинной записи модель зацикливается
+        # («RULE, RULE, RULE…», голосовое владельца 2026-10-21)
         segments, _ = self._model.transcribe(decode_ogg(ogg), language="ru", vad_filter=True,
-                                             beam_size=5, initial_prompt=hint or None)
-        return " ".join(s.text.strip() for s in segments if s.text.strip())
+                                             beam_size=5, initial_prompt=hint or None,
+                                             condition_on_previous_text=False)
+        return collapse_repeats(" ".join(s.text.strip() for s in segments if s.text.strip()))
+
+
+def collapse_repeats(text: str, limit: int = 2) -> str:
+    """Подряд повторённое слово (больше limit раз) — сбой распознавания: оставляем одно."""
+    out: list[str] = []
+    for word in text.split():
+        key = word.strip(",.;:!?").casefold()
+        run = 0
+        for prev in reversed(out):
+            if prev.strip(",.;:!?").casefold() != key:
+                break
+            run += 1
+        if key and run >= limit:
+            continue
+        out.append(word)
+    return " ".join(out)

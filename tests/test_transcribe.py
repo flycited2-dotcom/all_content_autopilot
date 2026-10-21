@@ -96,3 +96,9 @@ def test_factory_workers_and_start_commands():
     f.workers()
     f.start_workers()
     assert [r[0][3] for r in record] == ["workers", "start-workers"]
+
+
+def test_collapse_repeats_removes_whisper_loop():
+    from orchestrator_bot.transcribe import collapse_repeats
+    assert collapse_repeats("Поставщика Брис, LG, RULE, RULE, RULE, RULE, RULE,") == "Поставщика Брис, LG, RULE, RULE,"
+    assert collapse_repeats("да да нормально") == "да да нормально"

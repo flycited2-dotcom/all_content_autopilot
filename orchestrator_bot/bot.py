@@ -36,9 +36,10 @@ class Deps:
 
 
 def build_hint(hint: dict) -> str:
-    parts = ["Задачи контент-завода."]
+    parts = ["Задачи контент-завода: кондиционеры, сплит-системы, тепловые насосы, BTU, инверторные.",
+             "Поставщики: Бриз (Breeze), СплитХаб, БытТехОпт, АРУ."]
     if hint.get("brands"):
-        parts.append("Бренды и поставщики: " + ", ".join(hint["brands"]) + ".")
+        parts.append("Бренды: " + ", ".join(hint["brands"][:40]) + ".")
     if hint.get("sources"):
         parts.append("Источники: " + ", ".join(hint["sources"]) + ".")
     return " ".join(parts)

@@ -143,8 +143,9 @@ def render(reply: str, results: list[Result]) -> tuple[str, list[list[dict]]]:
         if result.log_id is not None:
             keyboard.append([{"text": "Отменить", "callback_data": f"c:{result.log_id}"}])
         if result.ask_id is not None and result.outcome.options:
-            keyboard.append([{"text": option, "callback_data": f"a:{result.ask_id}:{n}"}
-                             for n, option in enumerate(result.outcome.options)])
+            # по одной кнопке в строке: три варианта в ряд Telegram обрезает до нечитаемого
+            keyboard += [[{"text": option, "callback_data": f"a:{result.ask_id}:{n}"}]
+                         for n, option in enumerate(result.outcome.options)]
         if result.buttons:
             keyboard.append(list(result.buttons))
     return "\n".join(lines), keyboard
