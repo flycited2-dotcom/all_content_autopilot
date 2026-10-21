@@ -76,7 +76,7 @@ def poll(store, factory, tg, chat_id) -> None:
             continue
         if state.get("path"):
             try:
-                _preview(store, tg, chat_id, row, state["path"])
+                _preview(store, factory, tg, chat_id, row, state["path"])
             except Exception:
                 log.exception("превью %s", row["id"])
         elif state.get("status") in ("failed", "cancelled", "error", "missing", "missing_file"):
@@ -86,15 +86,29 @@ def poll(store, factory, tg, chat_id) -> None:
                     retry_buttons(row["n"]))
 
 
-def _preview(store, tg, chat_id, row, path):
+def final_text(store, factory, row) -> str:
+    """Текст, который уйдёт в канал: тело редактора + подвал системы (раздел сайта, телефон)."""
+    if row.get("final_text"):
+        return row["final_text"]
+    try:
+        text = factory.compose(row["id"], row["channel"], row["text"])
+    except Exception:
+        log.exception("подвал поста %s", row["id"])
+        return row["text"]
+    store.update_draft(row["n"], final_text=text)
+    return text
+
+
+def _preview(store, factory, tg, chat_id, row, path):
     """Как будет в канале: TG — фото с подписью; ВК — фото и текст. Кнопки — под отдельным сообщением с id
     (ответ на него — правка этой версии)."""
+    text = final_text(store, factory, row)
     if row["channel"] == "tg_editorial":
-        tg.send_photo(chat_id, path, caption=row["text"])
+        tg.send_photo(chat_id, path, caption=text)
         control = f"👆 Пост для Telegram-канала готов.\nid: {row['id']}"
     else:
         tg.send_photo(chat_id, path)
-        control = f"{row['text']}\n\n👆 Пост для группы ВК готов.\nid: {row['id']}"
+        control = f"{text}\n\n👆 Пост для группы ВК готов.\nid: {row['id']}"
     mid = tg.send(chat_id, control, buttons(row["n"], row["channel"]))
     store.update_draft(row["n"], status="ready", image_path=path, control_message_id=mid)
 
@@ -105,10 +119,11 @@ def publish(store, factory, tg, chat_id, n: int) -> None:
         tg.send(chat_id, _already(row))
         return
     try:
+        text = final_text(store, factory, row)
         if row["channel"] == "tg_editorial":
-            res = factory.publish_tg(row["id"], row["text"], row["image_path"])
+            res = factory.publish_tg(row["id"], text, row["image_path"])
         else:
-            res = factory.plan_vk(row["id"], row["text"], row["image_path"])
+            res = factory.plan_vk(row["id"], text, row["image_path"])
     except Exception as exc:
         log.exception("публикация %s", row["id"])
         res = {"ok": False, "error": f"{exc.__class__.__name__}: {str(exc)[-200:]}"}

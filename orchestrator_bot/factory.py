@@ -91,6 +91,14 @@ class Factory:
         finally:
             os.unlink(fh.name)
 
+    def compose(self, key: str, channel: str, text: str) -> str:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as fh:
+            fh.write(text)
+        try:
+            return self._run("compose", "--key", key, "--channel", channel, "--caption-file", fh.name)["text"]
+        finally:
+            os.unlink(fh.name)
+
     def publish_tg(self, key: str, caption: str, image: str) -> dict:
         return self._publish("publish-tg", key, caption, image)
 

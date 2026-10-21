@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS drafts (
     visual_prompt TEXT, image_job INTEGER, image_path TEXT, status TEXT NOT NULL DEFAULT 'new',
     control_message_id INTEGER, result TEXT, created REAL, updated REAL);
 """
-DRAFT_FIELDS = ("image_job", "image_path", "status", "control_message_id", "result", "visual_prompt")
+DRAFT_FIELDS = ("image_job", "image_path", "status", "control_message_id", "result", "visual_prompt", "final_text")
+_MIGRATIONS = ("ALTER TABLE drafts ADD COLUMN final_text TEXT",)
 
 
 class Store:
@@ -33,6 +34,11 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._c() as db:
             db.executescript(_SCHEMA)
+            for ddl in _MIGRATIONS:
+                try:
+                    db.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass                             # колонка уже есть
 
     def _c(self):
         db = sqlite3.connect(self.path, timeout=10, isolation_level=None)

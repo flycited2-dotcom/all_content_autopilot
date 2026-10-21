@@ -34,6 +34,9 @@ class FakeFactory:
     def visual_status(self, job_id):
         return self.status
 
+    def compose(self, key, channel, text):
+        return text + "\n🔎 сайт"
+
     def publish_tg(self, key, caption, image):
         self.published.append(("tg", key, caption, image))
         return self.publish_result
@@ -69,7 +72,7 @@ def test_ready_picture_sends_preview_with_buttons(tmp_path):
     assert tg.photos == []                                   # ещё рисуется
     factory.status = {"status": "done", "path": "/out/a.png", "error": None}
     drafts.poll(store, factory, tg, CHAT)
-    assert tg.photos == [("/out/a.png", "Текст поста")]      # как будет в канале
+    assert tg.photos == [("/out/a.png", "Текст поста\n🔎 сайт")]      # как будет в канале, с подвалом
     text, keyboard = tg.sent[-1]
     assert "id: heat-pumps" in text and keyboard[0][0]["callback_data"].startswith("d:p:")
     assert store.get_draft("heat-pumps")["status"] == "ready"
@@ -82,7 +85,7 @@ def test_publish_once_and_supersede_other_versions(tmp_path):
     drafts.poll(store, factory, tg, CHAT)
     n = store.get_draft("heat-pumps-v2")["n"]
     drafts.publish(store, factory, tg, CHAT, n)
-    assert factory.published == [("tg", "heat-pumps-v2", "Текст поста", "/out/a.png")]
+    assert factory.published == [("tg", "heat-pumps-v2", "Текст поста\n🔎 сайт", "/out/a.png")]
     assert "https://t.me/c/1/42" in tg.sent[-1][0]
     assert store.get_draft("heat-pumps")["status"] == "superseded"
     drafts.publish(store, factory, tg, CHAT, n)               # повторное нажатие
