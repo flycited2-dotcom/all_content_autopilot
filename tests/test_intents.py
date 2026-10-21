@@ -90,3 +90,17 @@ def test_normalize_keeps_redo_visual_with_draft_and_notes():
         {"type": "redo_visual", "draft_id": "heat-v4", "notes": "блок чистый"},
         {"type": "redo_visual", "draft_id": "../x", "notes": "x"}]})
     assert acts == [{"type": "redo_visual", "draft_id": "heat-v4", "notes": "блок чистый"}]
+
+
+def test_normalize_keeps_btu_and_frost_only_when_valid():
+    _, acts = intents.normalize({"actions": [
+        {"type": "enqueue_products", "category": "кондиционеры", "btu": [12, 9], "min_temp": 20},
+        {"type": "enqueue_products", "category": "кондиционеры", "btu": "9-12", "min_temp": 200}]})
+    assert acts[0]["btu"] == [9, 12] and acts[0]["min_temp"] == 20
+    assert "btu" not in acts[1] and "min_temp" not in acts[1]
+
+
+def test_factory_passes_spec_filters():
+    from orchestrator_bot.factory import Factory
+    args = Factory._select_args({"category": "кондиционеры", "btu": [9, 12], "min_temp": 20})
+    assert args[-4:] == ["--btu", "9-12", "--min-temp", "20"]

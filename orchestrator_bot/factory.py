@@ -46,6 +46,10 @@ class Factory:
             args += ["--quotas", json.dumps(action["quotas"], ensure_ascii=False)]
         if action.get("source"):
             args += ["--source", action["source"]]
+        if action.get("btu"):
+            args += ["--btu", "-".join(str(b) for b in action["btu"])]
+        if action.get("min_temp"):
+            args += ["--min-temp", str(action["min_temp"])]
         return args
 
     def hint(self) -> dict:

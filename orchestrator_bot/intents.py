@@ -61,12 +61,20 @@ def _enqueue(action: dict) -> dict | None:
     if not isinstance(quotas, dict):
         quotas = {}
     at = action.get("at")
-    return {"type": "enqueue_products", "category": category,
+    btu = action.get("btu")
+    btu = [int(b) for b in btu if isinstance(b, int) and 5 <= b <= 60][:2] if isinstance(btu, list) else []
+    frost = action.get("min_temp")
+    clean = {"type": "enqueue_products", "category": category,
             "count": count if isinstance(count, int) and count > 0 else None,
             "quotas": {str(k).lower(): (v if isinstance(v, int) and v > 0 else None) for k, v in quotas.items()},
             "source": action.get("source") or None,
             "at": at if isinstance(at, str) and _TIME.match(at) else None,
             "day": action.get("day") or None}
+    if btu:                                           # отбор по мощности/морозу — только если сказаны
+        clean["btu"] = sorted(btu)
+    if isinstance(frost, int) and 5 <= frost <= 40:
+        clean["min_temp"] = frost
+    return clean
 
 
 def normalize(intent: dict) -> tuple[str, list[dict]]:
