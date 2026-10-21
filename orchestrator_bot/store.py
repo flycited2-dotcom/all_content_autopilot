@@ -197,6 +197,13 @@ class Store:
         with self._c() as db:
             return [dict(r) for r in db.execute("SELECT * FROM drafts WHERE status=? ORDER BY n", (status,))]
 
+    def sibling_prompt(self, base: str, exclude_id: str, marker: str) -> str | None:
+        """Последнее описание картинки другой версии того же поста, в котором есть пожелания владельца."""
+        with self._c() as db:
+            row = db.execute("SELECT visual_prompt FROM drafts WHERE base=? AND id<>? AND visual_prompt LIKE ? "
+                             "ORDER BY updated DESC LIMIT 1", (base, exclude_id, f"%{marker}%")).fetchone()
+        return row[0] if row else None
+
     def supersede_versions(self, base: str, keep_n: int, now=None) -> list[int]:
         """Остальные версии того же черновика больше не публикуются."""
         with self._c() as db:

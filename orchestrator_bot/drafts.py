@@ -17,6 +17,7 @@ log = logging.getLogger("orchestrator_bot")
 CHANNELS = {"tg_editorial": "Telegram-канал", "vk_editorial": "группу ВК"}
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
 POLL_EVERY = 60                      # опрос готовности картинок — раз в минуту
+WISH_MARKER = "Обязательно учесть пожелания владельца"
 
 
 def base_id(draft_id: str) -> str:
@@ -45,6 +46,10 @@ def submit(store, factory, tg, chat_id, draft: dict) -> dict:
     if not store.add_draft(draft, base_id(draft["id"])):
         return {"ok": True, "new": False}
     row = store.get_draft(draft["id"])
+    carried = store.sibling_prompt(row["base"], row["id"], WISH_MARKER)
+    if carried:                                       # пожелания к картинке прошлой версии не теряем
+        store.update_draft(row["n"], visual_prompt=carried)
+        row = store.get_draft(row["n"])
     tg.send(chat_id, f"📝 {row['title']}\n\n{row['text']}\n\nid: {row['id']}\n\n"
                      f"🖼 Рисую картинку — пришлю готовый пост с кнопкой «Опубликовать».")
     _order_visual(store, factory, tg, chat_id, row, new=False)
@@ -157,7 +162,7 @@ def redo_visual(store, factory, key, notes: str, tg=None, chat_id=None) -> str:
     if row is None or row["status"] not in ("ready", "visual_failed"):
         return _already(row)
     base_prompt = row["visual_prompt"] or row["title"]
-    scene = f"{base_prompt}. Обязательно учесть пожелания владельца: {notes.strip()}"[:1500]
+    scene = f"{base_prompt}. {WISH_MARKER}: {notes.strip()}"[:1500]
     store.update_draft(row["n"], visual_prompt=scene)
     if tg is not None:
         _clear(tg, chat_id, row)

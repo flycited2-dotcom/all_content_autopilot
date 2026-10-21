@@ -141,3 +141,12 @@ def test_redo_visual_keeps_text_and_adds_wishes(tmp_path):
     row = store.get_draft("heat-pumps")
     assert row["status"] == "visual" and row["text"] == "Текст поста"
     assert "картинка ещё рисуется" in drafts.redo_visual(store, factory, "heat-pumps", "ещё")
+
+
+def test_picture_wishes_carry_over_to_next_version(tmp_path):
+    store, factory, tg = _setup(tmp_path)
+    factory.status = {"status": "done", "path": "/out/a.png", "error": None}
+    drafts.poll(store, factory, tg, CHAT)
+    drafts.redo_visual(store, factory, "heat-pumps", "блок чистый")
+    drafts.submit(store, factory, tg, CHAT, _draft("heat-pumps-v2"))
+    assert "блок чистый" in factory.submitted[-1][0] and factory.submitted[-1][1] == "orch-heat-pumps-v2"
