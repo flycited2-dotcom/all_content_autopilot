@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS drafts (
     visual_prompt TEXT, image_job INTEGER, image_path TEXT, status TEXT NOT NULL DEFAULT 'new',
     control_message_id INTEGER, result TEXT, created REAL, updated REAL);
 """
-DRAFT_FIELDS = ("image_job", "image_path", "status", "control_message_id", "result")
+DRAFT_FIELDS = ("image_job", "image_path", "status", "control_message_id", "result", "visual_prompt")
 
 
 class Store:

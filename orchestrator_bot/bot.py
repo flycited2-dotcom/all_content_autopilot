@@ -1,6 +1,7 @@
 """Telegram-бот оркестратора: приём сообщений владельца, голос, кнопки, режим без ПК."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -17,6 +18,8 @@ OFFLINE_NOTICE = "Принял, разберу, когда ПК будет на 
 NOT_HEARD = "🎙 Не разобрал голосовое — повторите или напишите текстом"
 TASK_WIZARD_URL = "https://t.me/Sendpr1ce_bot"
 ALERT_EVERY = 12 * 3600
+AWAIT_NOTE = "await_note"
+AWAIT_NOTE_TTL = 1800
 
 
 @dataclass
@@ -92,7 +95,30 @@ def _with_reply_context(message: dict, text: str) -> str:
     return f"{text}\n[ответ на черновик id: {found[-1]}]" if found else text
 
 
+def _take_note(deps, chat_id, text) -> str | None:
+    """Ждём пожелание после кнопки «Другая картинка»/«Править текст» (30 минут). Картинку переделываем
+    сразу на сервере; правку текста отдаём в разговор с пометкой черновика (как ответ на него)."""
+    raw = deps.store.get_meta(AWAIT_NOTE)
+    if not raw:
+        return text
+    deps.store.set_meta(AWAIT_NOTE, "")
+    note = json.loads(raw)
+    if deps.clock() - note["ts"] > AWAIT_NOTE_TTL:
+        return text
+    row = deps.store.get_draft(int(note["n"]))
+    if row is None:
+        return text
+    if note["kind"] == "visual":
+        deps.tg.send(chat_id, drafts.redo_visual(deps.store, deps.factory, row["n"], text, deps.tg, chat_id))
+        return None
+    return f"{text}\n[ответ на черновик id: {row['id']}]"
+
+
 def _queue(deps, chat_id, tg_message_id, kind, text):
+    if tg_message_id is not None:                    # живое сообщение владельца (не ответ на вопрос-кнопку)
+        text = _take_note(deps, chat_id, text)
+        if text is None:
+            return
     if deps.store.add_message(tg_message_id, kind, text, now=deps.clock()) is None:
         return                                       # повторная доставка — уже в очереди
     hb = deps.store.last_heartbeat()
@@ -142,6 +168,14 @@ def _callback(deps, cq):
             drafts.reject(deps.store, deps.tg, chat_id, int(n))
         elif op == "i":
             drafts.retry_image(deps.store, deps.factory, deps.tg, chat_id, int(n))
+        elif op in ("v", "e"):                       # следующее сообщение владельца — пожелание к этому черновику
+            row = deps.store.get_draft(int(n))
+            if row is None:
+                return
+            kind = "visual" if op == "v" else "text"
+            deps.store.set_meta(AWAIT_NOTE, json.dumps({"kind": kind, "n": row["n"], "ts": deps.clock()}))
+            what = "картинке" if kind == "visual" else "тексте"
+            deps.tg.send(chat_id, f"Напишите или надиктуйте, что изменить в {what} «{row['title']}».")
     elif data.startswith("c:"):
         deps.tg.send(chat_id, actions.cancel_logged(data[2:], deps.factory, deps.store, None))
     elif data.startswith("a:"):

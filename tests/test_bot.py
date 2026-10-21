@@ -289,3 +289,36 @@ def test_cancel_explains_items_already_in_preview(deps):
     text = deps.tg.texts()[-1]
     assert "Отменено: 0" in text
     assert "уже на превью" in text and "❌" in text and "2" in text
+
+
+def _ready_draft(deps):
+    deps.store.add_draft({"id": "heat-v4", "channel": "vk_editorial", "title": "Насосы", "text": "Т",
+                          "visual_prompt": "насос"}, "heat")
+    row = deps.store.get_draft("heat-v4")
+    deps.store.update_draft(row["n"], status="ready", image_path="/o/a.png")
+    submitted = []
+    deps.factory.visual_submit = lambda scene, key, new=False: submitted.append((scene, key)) or {"job_id": 9}
+    deps.tg.clear_buttons = lambda chat, mid: None
+    return row["n"], submitted
+
+
+def test_other_picture_button_takes_next_message_as_wish(deps):
+    n, submitted = _ready_draft(deps)
+    bot.handle_update(_cb(f"d:v:{n}"), deps)
+    assert "что изменить в картинке" in deps.tg.texts()[-1]
+    bot.handle_update(_msg("блок чистый, дом зимой"), deps)
+    assert deps.store.count_new() == 0                      # Claude не нужен — перерисовывает сервер
+    assert "блок чистый, дом зимой" in submitted[0][0] and submitted[0][1].startswith("orch-heat-v4-r")
+    assert "Текст не меняю" in deps.tg.texts()[-1]
+    assert deps.store.get_draft(n)["status"] == "visual"
+
+
+def test_edit_text_button_routes_next_message_to_revision(deps):
+    n, _ = _ready_draft(deps)
+    bot.handle_update(_cb(f"d:e:{n}"), deps)
+    bot.handle_update(_msg("короче вдвое"), deps)
+    queued = deps.store.claim_next(NOW)
+    assert queued["text"] == "короче вдвое\n[ответ на черновик id: heat-v4]"
+    bot.handle_update({"update_id": 3, "message": {"message_id": 6, "chat": {"id": OWNER}, "from": {"id": OWNER},
+                                                   "text": "а теперь просто вопрос"}}, deps)
+    assert deps.store.claim_next(NOW)["text"] == "а теперь просто вопрос"   # ожидание одноразовое

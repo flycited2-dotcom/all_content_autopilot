@@ -83,3 +83,10 @@ def test_normalize_rejects_bad_time_and_draft_id():
     ]})
     assert actions[0]["at"] is None
     assert [a.get("draft_id") for a in actions[1:]] == ["nasosy-v2"]
+
+
+def test_normalize_keeps_redo_visual_with_draft_and_notes():
+    reply, acts = intents.normalize({"reply": "ок", "actions": [
+        {"type": "redo_visual", "draft_id": "heat-v4", "notes": "блок чистый"},
+        {"type": "redo_visual", "draft_id": "../x", "notes": "x"}]})
+    assert acts == [{"type": "redo_visual", "draft_id": "heat-v4", "notes": "блок чистый"}]

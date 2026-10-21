@@ -1,6 +1,7 @@
 """Исполнение исходов (общий код для API слушателя и кнопок Telegram)."""
 from __future__ import annotations
 
+from orchestrator_bot import drafts
 from orchestrator_bot.intents import Outcome, Result
 
 
@@ -26,6 +27,9 @@ def execute(outcome: Outcome, factory, store, msg_id) -> Result:
         return Result(outcome, outcome.text, ask_id=ask_id)
     if kind == "cancel":
         return Result(outcome, cancel_logged(outcome.action.get("task_ref"), factory, store, msg_id))
+    if kind == "redo_visual":                           # картинку переделывает сервер, текст не трогаем
+        store.log_action(msg_id, kind, outcome.action, {})
+        return Result(outcome, drafts.redo_visual(store, factory, outcome.action["draft_id"], outcome.action["notes"]))
     if kind in ("run_editorial", "revise_editorial"):
         store.log_action(msg_id, kind, outcome.action, {})
         what = "экспертные посты" if kind == "run_editorial" else f"правку черновика {outcome.action['draft_id']}"

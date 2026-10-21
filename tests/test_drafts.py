@@ -126,3 +126,15 @@ def test_reject_and_unknown_channel(tmp_path):
     import pytest
     with pytest.raises(ValueError):
         drafts.submit(store, factory, tg, CHAT, _draft("x", "tg_products"))
+
+
+def test_redo_visual_keeps_text_and_adds_wishes(tmp_path):
+    store, factory, tg = _setup(tmp_path)
+    factory.status = {"status": "done", "path": "/out/a.png", "error": None}
+    drafts.poll(store, factory, tg, CHAT)
+    reply = drafts.redo_visual(store, factory, "heat-pumps", "без грязи на блоке")
+    assert "Текст не меняю" in reply
+    assert "без грязи на блоке" in factory.submitted[-1][0] and factory.submitted[-1][2] is True
+    row = store.get_draft("heat-pumps")
+    assert row["status"] == "visual" and row["text"] == "Текст поста"
+    assert "картинка ещё рисуется" in drafts.redo_visual(store, factory, "heat-pumps", "ещё")

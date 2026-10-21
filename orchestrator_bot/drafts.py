@@ -26,7 +26,9 @@ def base_id(draft_id: str) -> str:
 def buttons(n: int, channel: str) -> list:
     where = "в канал" if channel == "tg_editorial" else "в ВК-план"
     return [[{"text": f"✅ Опубликовать {where}", "callback_data": f"d:p:{n}"},
-             {"text": "❌ Отклонить", "callback_data": f"d:r:{n}"}]]
+             {"text": "❌ Отклонить", "callback_data": f"d:r:{n}"}],
+            [{"text": "🖼 Другая картинка", "callback_data": f"d:v:{n}"},
+             {"text": "✏️ Править текст", "callback_data": f"d:e:{n}"}]]
 
 
 def retry_buttons(n: int) -> list:
@@ -132,6 +134,28 @@ def reject(store, tg, chat_id, n: int) -> None:
         return
     _clear(tg, chat_id, row)
     tg.send(chat_id, f"❌ «{row['title']}» отклонён, публиковаться не будет.")
+
+
+def redo_visual(store, factory, key, notes: str, tg=None, chat_id=None) -> str:
+    """Новая картинка с пожеланиями владельца; текст поста не меняется. key — id или номер черновика."""
+    row = store.get_draft(key)
+    if row is None or row["status"] not in ("ready", "visual_failed"):
+        return _already(row)
+    base_prompt = row["visual_prompt"] or row["title"]
+    scene = f"{base_prompt}. Обязательно учесть пожелания владельца: {notes.strip()}"[:1500]
+    store.update_draft(row["n"], visual_prompt=scene)
+    if tg is not None:
+        _clear(tg, chat_id, row)
+    row = store.get_draft(row["n"])
+    _order_visual(store, factory, tg or _Silent(), chat_id, row, new=True)
+    if store.get_draft(row["n"])["status"] != "visual":
+        return f"❌ Новую картинку для «{row['title']}» заказать не удалось"
+    return f"🖼 Заказал новую картинку для «{row['title']}» с учётом: {notes.strip()[:200]}. Текст не меняю."
+
+
+class _Silent:
+    def send(self, *args, **kwargs):
+        return None
 
 
 def retry_image(store, factory, tg, chat_id, n: int) -> None:

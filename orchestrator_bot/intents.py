@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable
 
-ACTION_TYPES = ("enqueue_products", "cancel", "run_editorial", "revise_editorial", "ask")
+ACTION_TYPES = ("enqueue_products", "cancel", "run_editorial", "revise_editorial", "redo_visual", "ask")
 _TIME = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 _DRAFT_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _ISO_DAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
@@ -84,9 +84,9 @@ def normalize(intent: dict) -> tuple[str, list[dict]]:
             clean = {"type": "run_editorial", "brief": str(action.get("brief") or ""),
                      "channels": [c for c in action.get("channels") or [] if c in ("tg_editorial", "vk_editorial")]}
             clean = clean if clean["brief"] else None
-        elif kind == "revise_editorial":
+        elif kind in ("revise_editorial", "redo_visual"):
             draft_id = str(action.get("draft_id") or "")
-            clean = ({"type": "revise_editorial", "draft_id": draft_id, "notes": str(action.get("notes") or "")}
+            clean = ({"type": kind, "draft_id": draft_id, "notes": str(action.get("notes") or "")}
                      if _DRAFT_ID.match(draft_id) and action.get("notes") else None)
         else:
             options = [str(o) for o in action.get("options") or []]
