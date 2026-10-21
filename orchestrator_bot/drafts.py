@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime
 
 log = logging.getLogger("orchestrator_bot")
@@ -51,7 +52,9 @@ def submit(store, factory, tg, chat_id, draft: dict) -> dict:
 def _order_visual(store, factory, tg, chat_id, row, new: bool):
     scene = row["visual_prompt"] or row["title"] or row["text"][:300]
     try:
-        job = factory.visual_submit(scene, f"orch:{row['id']}", new=new)
+        # ключ фото-агента — только [A-Za-z0-9_-]; повтор — новый ключ (старый привязан к упавшему заданию)
+        key = f"orch-{row['id']}" + (f"-r{int(time.time())}" if new else "")
+        job = factory.visual_submit(scene, key[:128], new=new)
     except Exception as exc:
         log.exception("заказ картинки %s", row["id"])
         store.update_draft(row["n"], status="visual_failed")

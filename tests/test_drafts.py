@@ -56,7 +56,7 @@ def _setup(tmp_path, draft=None):
 
 def test_submit_orders_picture_once(tmp_path):
     store, factory, tg = _setup(tmp_path)
-    assert factory.submitted == [("насос у дома зимой", "orch:heat-pumps", False)]
+    assert factory.submitted == [("насос у дома зимой", "orch-heat-pumps", False)]
     assert store.get_draft("heat-pumps")["status"] == "visual"
     assert "Рисую картинку" in tg.sent[0][0] and "id: heat-pumps" in tg.sent[0][0]
     assert drafts.submit(store, factory, tg, CHAT, _draft()) == {"ok": True, "new": False}
@@ -115,6 +115,7 @@ def test_failed_picture_offers_retry(tmp_path):
     drafts.poll(store, factory, tg, CHAT)
     assert "не получилась: limit" in tg.sent[-1][0] and tg.sent[-1][1][0][0]["callback_data"].startswith("d:i:")
     drafts.retry_image(store, factory, tg, CHAT, store.get_draft("heat-pumps")["n"])
+    assert factory.submitted[-1][1].startswith("orch-heat-pumps-r")
     assert factory.submitted[-1][2] is True and store.get_draft("heat-pumps")["status"] == "visual"
 
 
