@@ -61,7 +61,7 @@ def main() -> int:
                          "-L", "8790:127.0.0.1:8790", f"root@{os.environ.get('ORCH_SSH_HOST', '212.116.115.150')}"])
         atexit.register(tunnel.close)
     log.info("слушатель запущен")
-    worker = EditorialWorker(brain.run_with_kill, api.reply, root=ROOT)
+    worker = EditorialWorker(brain.run_with_kill, api.reply, root=ROOT, submit_draft=api.draft)
     turn = lambda payload, sess: brain.run_turn(payload, sess, root=ROOT)  # noqa: E731
     last_beat = 0.0
     parent = os.getppid()

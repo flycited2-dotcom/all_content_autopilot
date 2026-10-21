@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from orchestrator_bot import actions, intents, workers
+from orchestrator_bot import actions, drafts, intents, workers
 from orchestrator_bot.api import start_of_day
 from orchestrator_bot.intents import Outcome
 
@@ -134,6 +134,14 @@ def _callback(deps, cq):
             deps.tg.send(chat_id, workers.start(deps.factory))
         except Exception as exc:
             deps.tg.send(chat_id, f"❌ Запустить не удалось: {exc.__class__.__name__}")
+    elif data.startswith("d:"):                      # этап 3: черновик — опубликовать / отклонить / ещё картинку
+        _, op, n = data.split(":")
+        if op == "p":
+            drafts.publish(deps.store, deps.factory, deps.tg, chat_id, int(n))
+        elif op == "r":
+            drafts.reject(deps.store, deps.tg, chat_id, int(n))
+        elif op == "i":
+            drafts.retry_image(deps.store, deps.factory, deps.tg, chat_id, int(n))
     elif data.startswith("c:"):
         deps.tg.send(chat_id, actions.cancel_logged(data[2:], deps.factory, deps.store, None))
     elif data.startswith("a:"):
@@ -206,6 +214,14 @@ def offline_alert(deps: Deps, now: float) -> None:
     deps.store.set_meta("offline_alert", str(now))
 
 
+def poll_drafts(deps: Deps, now: float) -> None:
+    last = deps.store.get_meta("drafts_poll")
+    if last and now - float(last) < drafts.POLL_EVERY:
+        return
+    deps.store.set_meta("drafts_poll", str(now))
+    drafts.poll(deps.store, deps.factory, deps.tg, deps.owner_chat_id)
+
+
 def process_updates(updates: list[dict], deps: Deps) -> None:
     for update in updates:
         try:
@@ -221,6 +237,7 @@ def run_forever(deps: Deps) -> None:
             offset = deps.store.get_meta("tg_offset")
             process_updates(deps.tg.get_updates(int(offset) if offset else None), deps)
             offline_alert(deps, deps.clock())
+            poll_drafts(deps, deps.clock())
         except Exception:
             log.exception("цикл бота")
             time.sleep(5)

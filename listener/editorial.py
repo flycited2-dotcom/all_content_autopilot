@@ -17,8 +17,9 @@ log = logging.getLogger("listener")
 
 
 class EditorialWorker:
-    def __init__(self, runner, post, root=Path("."), today=lambda: date.today().isoformat()):
+    def __init__(self, runner, post, root=Path("."), today=lambda: date.today().isoformat(), submit_draft=None):
         self.runner, self.post, self.root, self.today = runner, post, Path(root), today
+        self.submit_draft = submit_draft             # этап 3: принятая версия → сервер (картинка, кнопка ✅)
         self.jobs: queue.Queue = queue.Queue()
         self._idle = threading.Event()
         self._idle.set()
@@ -97,7 +98,7 @@ class EditorialWorker:
         self._post(summary.read_text(encoding="utf-8"))
         for draft in sorted((run_dir / "drafts").glob("*.json")):
             if draft.name not in before and self._accepted(run_dir, draft.stem):
-                self._post(self._draft_text(draft))
+                self._deliver(draft)
 
     def _draft_day(self, draft_id) -> str:
         found = sorted((self.root / "runs").glob(f"*/drafts/{draft_id}.json"))
@@ -118,12 +119,25 @@ class EditorialWorker:
         if not versions:
             self._post("❌ Новая версия черновика не появилась")
             return
-        text = self._draft_text(versions[-1])
         verdict = self._verdict(self.root / "runs" / day, versions[-1].stem)
-        if verdict is not None and not verdict.get("ok"):
+        if verdict is not None and verdict.get("ok"):
+            self._deliver(versions[-1])
+            return
+        text = self._draft_text(versions[-1])
+        if verdict is not None:                      # не принятая контролёром версия — только текстом, без ✅
             notes = (verdict.get("judgement") or {}).get("notes") or []
             text = f"⚠️ Контролёр не принял: {notes[-1] if notes else 'без пояснения'}\n\n{text}"
         self._post(text)
+
+    def _deliver(self, path):
+        """Принятая версия: на сервер (картинка и кнопка «Опубликовать»); без сервера — текстом, как раньше."""
+        if self.submit_draft is not None:
+            try:
+                self.submit_draft(json.loads(Path(path).read_text(encoding="utf-8")))
+                return
+            except Exception:
+                log.exception("черновик %s не принят сервером — отправляю текстом", Path(path).stem)
+        self._post(self._draft_text(path))
 
     @staticmethod
     def _verdict(run_dir, draft_id) -> dict | None:

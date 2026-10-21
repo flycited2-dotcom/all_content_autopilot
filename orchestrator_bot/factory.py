@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 import time
 
 from orchestrator_bot.intents import due_text
@@ -74,3 +75,24 @@ class Factory:
 
     def status(self, since: float) -> dict:
         return self._run("status", "--since", str(since))
+
+    # ── этап 3: посты оркестратора ──
+    def visual_submit(self, scene: str, request_key: str, new: bool = False) -> dict:
+        return self._run("visual-submit", "--scene", scene, "--request-key", request_key, *(["--new"] if new else []))
+
+    def visual_status(self, job_id: int) -> dict:
+        return self._run("visual-status", "--job", str(job_id))
+
+    def _publish(self, command: str, key: str, caption: str, image: str) -> dict:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as fh:
+            fh.write(caption)
+        try:
+            return self._run(command, "--key", key, "--caption-file", fh.name, "--image", image)
+        finally:
+            os.unlink(fh.name)
+
+    def publish_tg(self, key: str, caption: str, image: str) -> dict:
+        return self._publish("publish-tg", key, caption, image)
+
+    def plan_vk(self, key: str, caption: str, image: str) -> dict:
+        return self._publish("plan-vk", key, caption, image)

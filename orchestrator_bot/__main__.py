@@ -7,6 +7,7 @@ import threading
 import time
 
 from orchestrator_bot import bot, report
+from orchestrator_bot import drafts
 from orchestrator_bot.api import make_server, start_of_day
 from orchestrator_bot.config import Settings
 from orchestrator_bot.factory import Factory
@@ -49,7 +50,9 @@ def main(argv=None) -> int:
         print("usage: python -m orchestrator_bot run|report", file=sys.stderr)
         return 2
     send = lambda text, keyboard=None: tg.send(settings.owner_chat_id, text, keyboard)  # noqa: E731
-    server = make_server(store, factory, send, settings.api_token, settings.api_port, settings.doubt_threshold)
+    on_draft = lambda draft: drafts.submit(store, factory, tg, settings.owner_chat_id, draft)  # noqa: E731
+    server = make_server(store, factory, send, settings.api_token, settings.api_port, settings.doubt_threshold,
+                         on_draft=on_draft)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         tg.set_commands(bot.BOT_COMMANDS)              # меню команд у кнопки «Меню» рядом с полем ввода

@@ -116,6 +116,38 @@ def test_editorial_posts_summary_and_drafts(tmp_path):
     assert (tmp_path / "inbox" / "brief.md").read_text(encoding="utf-8").strip() == "насосы"
 
 
+def test_accepted_draft_goes_to_server_and_falls_back_to_text(tmp_path):
+    # этап 3: принятая версия уходит на сервер (картинка, кнопка ✅); сервер недоступен — текстом
+    day = tmp_path / "runs" / "2026-10-21"
+
+    def runner(cmd, **kw):
+        (day / "drafts").mkdir(parents=True, exist_ok=True)
+        (day / "verdicts").mkdir(exist_ok=True)
+        (day / "summary.md").write_text("Итог", encoding="utf-8")
+        (day / "drafts" / "a.json").write_text('{"id": "a", "channel": "tg_editorial", "title": "Т", "text": "А"}',
+                                               encoding="utf-8")
+        (day / "verdicts" / "a.json").write_text('{"ok": true}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    posted, sent = [], []
+    worker = EditorialWorker(runner, lambda text, keyboard=None: posted.append(text), root=tmp_path,
+                             today=lambda: "2026-10-21", submit_draft=sent.append)
+    worker.submit({"type": "run_editorial", "brief": "x", "channels": []})
+    worker.join_idle(5)
+    assert posted == ["Итог"] and sent == [{"id": "a", "channel": "tg_editorial", "title": "Т", "text": "А"}]
+
+    def broken(draft):
+        raise ConnectionError("туннель")
+
+    (day / "summary.md").unlink()
+    (day / "drafts" / "a.json").unlink()
+    posted.clear()
+    worker.submit_draft = broken
+    worker.submit({"type": "run_editorial", "brief": "x", "channels": []})
+    worker.join_idle(5)
+    assert posted[0] == "Итог" and "id: a" in posted[1]
+
+
 def test_second_run_same_day_posts_only_new_drafts(tmp_path):
     day = tmp_path / "runs" / "2026-10-21"
     (day / "drafts").mkdir(parents=True)

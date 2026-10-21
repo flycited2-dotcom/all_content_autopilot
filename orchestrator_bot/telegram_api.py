@@ -1,6 +1,9 @@
 """Тонкий клиент Telegram Bot API (только то, что нужно оркестратору)."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import httpx
 
 _MAX_TEXT = 4000            # лимит Telegram 4096, с запасом
@@ -57,6 +60,24 @@ class TelegramApi:
         if keyboard:
             params["reply_markup"] = self._markup(keyboard)
         self._call("editMessageText", **params)
+
+    def send_photo(self, chat_id, path, caption="", keyboard=None) -> int:
+        """Фото с диска VPS (картинка фото-агента). Подпись Telegram — до 1024 символов."""
+        data = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption[:1024]
+        if keyboard:
+            data["reply_markup"] = json.dumps(self._markup(keyboard), ensure_ascii=False)
+        with open(path, "rb") as fh:
+            resp = self.http.post(self.base + "sendPhoto", data=data, files={"photo": (Path(path).name, fh)})
+        body = resp.json()
+        if not body.get("ok"):
+            raise RuntimeError(f"Telegram sendPhoto: {body.get('description', resp.status_code)}")
+        return body["result"]["message_id"]
+
+    def clear_buttons(self, chat_id, message_id):
+        self._call("editMessageReplyMarkup", chat_id=chat_id, message_id=message_id,
+                   reply_markup={"inline_keyboard": []})
 
     def download_voice(self, file_id) -> bytes:
         path = self._call("getFile", file_id=file_id)["file_path"]

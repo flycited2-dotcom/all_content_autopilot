@@ -26,5 +26,8 @@ class ApiClient:
     def reply(self, text, keyboard=None) -> dict:
         return self._post("/reply", {"text": text, "keyboard": keyboard})
 
+    def draft(self, draft: dict) -> dict:
+        return self._post("/draft", {"draft": draft})
+
     def heartbeat(self) -> dict:
         return self._post("/heartbeat", {})

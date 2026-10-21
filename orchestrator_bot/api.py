@@ -59,7 +59,8 @@ def _failed(what, exc) -> str:
     return f"❌ Не удалось: {what} — {exc.__class__.__name__}: {str(exc)[:200]}"
 
 
-def make_server(store, factory, send, token, port, threshold=40, clock=time.time) -> ThreadingHTTPServer:
+def make_server(store, factory, send, token, port, threshold=40, clock=time.time,
+                on_draft=None) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):          # без журнала запросов в stderr
             pass
@@ -120,6 +121,8 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
                 if self.path == "/reply":
                     send(body["text"], body.get("keyboard"))
                     return self._json(200, {"ok": True})
+                if self.path == "/draft" and on_draft is not None:   # этап 3: принятая версия → картинка → ✅
+                    return self._json(200, on_draft(body["draft"]))
                 if self.path == "/intent":
                     return self._json(200, handle_intent(store, factory, send, body["message_id"],
                                                          body["intent"], threshold))

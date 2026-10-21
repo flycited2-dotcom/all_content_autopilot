@@ -19,7 +19,12 @@ CREATE TABLE IF NOT EXISTS actions_log (
 CREATE TABLE IF NOT EXISTS asks (
     id INTEGER PRIMARY KEY, msg_id INTEGER, action TEXT, options TEXT, used INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS drafts (
+    n INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, base TEXT, channel TEXT, title TEXT, text TEXT,
+    visual_prompt TEXT, image_job INTEGER, image_path TEXT, status TEXT NOT NULL DEFAULT 'new',
+    control_message_id INTEGER, result TEXT, created REAL, updated REAL);
 """
+DRAFT_FIELDS = ("image_job", "image_path", "status", "control_message_id", "result")
 
 
 class Store:
@@ -145,6 +150,56 @@ class Store:
     def last_heartbeat(self) -> float | None:
         value = self.get_meta("heartbeat")
         return float(value) if value else None
+
+
+    # ── черновики оркестратора (этап 3) ──
+    def add_draft(self, draft: dict, base: str, now=None) -> bool:
+        """False — эта версия уже пришла (повтор от слушателя)."""
+        now = now or time.time()
+        with self._c() as db:
+            cur = db.execute(
+                "INSERT OR IGNORE INTO drafts(id, base, channel, title, text, visual_prompt, created, updated) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (draft["id"], base, draft["channel"], draft.get("title", ""), draft["text"],
+                 draft.get("visual_prompt", ""), now, now))
+        return cur.rowcount == 1
+
+    def get_draft(self, key) -> dict | None:
+        """key — id черновика (str) или номер строки n (int, для кнопок: callback_data ≤ 64 байт)."""
+        column = "n" if isinstance(key, int) else "id"
+        with self._c() as db:
+            row = db.execute(f"SELECT * FROM drafts WHERE {column}=?", (key,)).fetchone()
+        return dict(row) if row else None
+
+    def update_draft(self, n: int, now=None, **fields):
+        bad = set(fields) - set(DRAFT_FIELDS)
+        if bad:
+            raise ValueError(f"поля черновика: {bad}")
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._c() as db:
+            db.execute(f"UPDATE drafts SET {sets}, updated=? WHERE n=?", (*fields.values(), now or time.time(), n))
+
+    def move_draft(self, n: int, src: tuple, dst: str, now=None) -> bool:
+        """Атомарный переход статуса: False — черновик уже не в src (повторное нажатие)."""
+        marks = ",".join("?" for _ in src)
+        with self._c() as db:
+            cur = db.execute(f"UPDATE drafts SET status=?, updated=? WHERE n=? AND status IN ({marks})",
+                             (dst, now or time.time(), n, *src))
+        return cur.rowcount == 1
+
+    def drafts_with_status(self, status) -> list[dict]:
+        with self._c() as db:
+            return [dict(r) for r in db.execute("SELECT * FROM drafts WHERE status=? ORDER BY n", (status,))]
+
+    def supersede_versions(self, base: str, keep_n: int, now=None) -> list[int]:
+        """Остальные версии того же черновика больше не публикуются."""
+        with self._c() as db:
+            rows = [r[0] for r in db.execute(
+                "SELECT n FROM drafts WHERE base=? AND n<>? AND status IN ('new','visual','visual_failed','ready')",
+                (base, keep_n))]
+            db.executemany("UPDATE drafts SET status='superseded', updated=? WHERE n=?",
+                           [(now or time.time(), n) for n in rows])
+        return rows
 
 
 def _log_row(row) -> dict:
