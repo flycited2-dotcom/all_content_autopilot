@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from listener import brain, lifecycle, session
+from listener import brain, lifecycle, morning, session
 from listener.client import ApiClient
 from listener.editorial import EditorialWorker
 from listener.tunnel import Tunnel
@@ -75,6 +75,7 @@ def main() -> int:
             if time.time() - last_beat >= HEARTBEAT_SECONDS:
                 api.heartbeat()
                 last_beat = time.time()
+            morning.maybe_run(datetime.now(), ROOT / "runs" / "chat" / "morning.json", worker, api.reply)
             sess = session.day_session(datetime.now(), ROOT / "runs" / "chat" / "session.json")
             if not process_once(api, worker, turn, sess):
                 time.sleep(POLL_SECONDS)
