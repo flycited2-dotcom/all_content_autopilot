@@ -197,6 +197,14 @@ class Store:
         with self._c() as db:
             return [dict(r) for r in db.execute("SELECT * FROM drafts WHERE status=? ORDER BY n", (status,))]
 
+    def drafts_summary(self, since: float) -> dict:
+        """Для статуса и вечерней сводки: сколько ждут ✅, рисуются, и что опубликовано с since."""
+        with self._c() as db:
+            counts = dict(db.execute("SELECT status, COUNT(*) FROM drafts GROUP BY status").fetchall())
+            done = [r[0] for r in db.execute(
+                "SELECT result FROM drafts WHERE status='published' AND updated>=? ORDER BY updated", (since,))]
+        return {"ready": counts.get("ready", 0), "visual": counts.get("visual", 0), "published": done}
+
     def sibling_prompt(self, base: str, exclude_id: str, marker: str) -> str | None:
         """Последнее описание картинки другой версии того же поста, в котором есть пожелания владельца."""
         with self._c() as db:

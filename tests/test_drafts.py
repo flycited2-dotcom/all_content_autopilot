@@ -150,3 +150,18 @@ def test_picture_wishes_carry_over_to_next_version(tmp_path):
     drafts.redo_visual(store, factory, "heat-pumps", "блок чистый")
     drafts.submit(store, factory, tg, CHAT, _draft("heat-pumps-v2"))
     assert "блок чистый" in factory.submitted[-1][0] and factory.submitted[-1][1] == "orch-heat-pumps-v2"
+
+
+def test_summary_for_status_and_report(tmp_path):
+    from orchestrator_bot.bot import drafts_line
+    from orchestrator_bot.report import build_report
+    store, factory, tg = _setup(tmp_path)
+    factory.status = {"status": "done", "path": "/out/a.png", "error": None}
+    drafts.poll(store, factory, tg, CHAT)
+    summary = store.drafts_summary(0)
+    assert drafts_line(summary) == "\n📝 Посты: ждут вашего ✅ — 1"
+    drafts.publish(store, factory, tg, CHAT, store.get_draft("heat-pumps")["n"])
+    summary = store.drafts_summary(0)
+    assert "опубликовано сегодня — 1" in drafts_line(summary)
+    text = build_report({}, [], None, 0, drafts=summary)
+    assert "Опубликовано в канале: https://t.me/c/1/42" in text

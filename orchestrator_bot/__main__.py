@@ -27,7 +27,8 @@ def _report_text(store, factory) -> str:
         worker_state = factory.workers()
     except Exception:
         worker_state = None
-    return report.build_report(status, store.actions_since(since), store.last_heartbeat(), now, workers=worker_state)
+    return report.build_report(status, store.actions_since(since), store.last_heartbeat(), now, workers=worker_state,
+                               drafts=store.drafts_summary(since))
 
 
 def configure_logging() -> None:

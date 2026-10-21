@@ -64,11 +64,22 @@ def status_message(deps) -> tuple[str, list | None]:
     except Exception as exc:
         agent = f"Контент-агент: не удалось проверить ({exc.__class__.__name__})"
     text = (f"📋 Статус\nКонвейер: {pipeline}\n{agent}\n{_pc_line(deps, now)}\n"
-            f"В очереди к ПК: {deps.store.count_new()}")
+            f"В очереди к ПК: {deps.store.count_new()}{drafts_line(deps.store.drafts_summary(start_of_day(now)))}")
     return text, (None if ready else [[workers.START_BUTTON]])     # остановлен — запуск одной кнопкой
 
 
-BTN_STATUS, BTN_REPORT, BTN_WIZARD = "📋 Статус", "🧾 Сводка", "🛠 Мастер задач"
+def drafts_line(summary: dict) -> str:
+    parts = []
+    if summary["ready"]:
+        parts.append(f"ждут вашего ✅ — {summary['ready']}")
+    if summary["visual"]:
+        parts.append(f"рисуется картинка — {summary['visual']}")
+    if summary["published"]:
+        parts.append(f"опубликовано сегодня — {len(summary['published'])}")
+    return ("\n📝 Посты: " + ", ".join(parts)) if parts else ""
+
+
+BTN_STATUS, BTN_REPORT, BTN_WIZARD ="📋 Статус", "🧾 Сводка", "🛠 Мастер задач"
 MAIN_KEYBOARD = [[BTN_STATUS, BTN_REPORT], [BTN_WIZARD]]
 BOT_COMMANDS = [("status", "Статус завода и контент-агента"), ("report", "Сводка за день"),
                 ("menu", "Показать кнопки")]

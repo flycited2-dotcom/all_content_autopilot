@@ -9,7 +9,7 @@ PC_FRESH = 600          # heartbeat свежее 10 минут — ПК на с�
 
 
 def build_report(status: dict, actions: list[dict], last_heartbeat: float | None, now: float,
-                 workers: dict | None = None) -> str:
+                 workers: dict | None = None, drafts: dict | None = None) -> str:
     lines = ["📋 Итог дня"]
     enqueued = [a for a in actions if a["kind"] == "enqueue"]
     cancelled = sum(int(a["result"].get("cancelled") or 0) for a in actions if a["kind"] == "cancel")
@@ -29,7 +29,11 @@ def build_report(status: dict, actions: list[dict], last_heartbeat: float | None
         lines.append(f"Опубликовано: {status['published_since']}")
     for a in editorial:
         what = a["payload"].get("brief") or f"правка {a['payload'].get('draft_id', '')}"
-        lines.append(f"📝 Редакционное: {what}")
+        lines.append(f"📝 Редакционное: {what[:100]}{'…' if len(what) > 100 else ''}")
+    if drafts:
+        lines += [f"  {r}" for r in drafts["published"] if r]
+        if drafts["ready"]:
+            lines.append(f"📝 Ждут вашего ✅: {drafts['ready']}")
     if workers is not None:
         lines.append(readiness(workers)[1])
     if last_heartbeat is not None and now - last_heartbeat <= PC_FRESH:
