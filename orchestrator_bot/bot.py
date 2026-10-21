@@ -301,6 +301,7 @@ def run_forever(deps: Deps) -> None:
             offline_alert(deps, deps.clock())
             poll_drafts(deps, deps.clock())
             feed.tick(deps, deps.clock())
+            drafts.publish_scheduled(deps.store, deps.factory, deps.tg, deps.owner_chat_id, deps.clock())
         except Exception:
             log.exception("цикл бота")
             time.sleep(5)

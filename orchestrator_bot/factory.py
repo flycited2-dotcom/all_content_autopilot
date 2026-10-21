@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 import time
 
-from orchestrator_bot.intents import due_text
 
 
 class FactoryError(RuntimeError):
@@ -62,11 +61,9 @@ class Factory:
         return self._run("resolve", *self._select_args(action))
 
     def enqueue(self, action: dict) -> dict:
-        args = self._select_args(action)
-        due = due_text(action)
-        if due:
-            args += ["--due", due]
-        return self._run("enqueue", *args)
+        # Время из слов владельца — время ВЫХОДА партии (владелец, 2026-10-21), а не старта генерации:
+        # карточки делаются сразу, партия публикуется в названное время (feed.publish_at).
+        return self._run("enqueue", *self._select_args(action))
 
     def cancel(self, keys: list[str]) -> dict:
         return self._run("cancel", "--keys", ",".join(keys))

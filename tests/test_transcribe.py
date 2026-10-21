@@ -61,7 +61,7 @@ def test_factory_builds_cli_args_and_parses_json():
     args, kwargs = record[0]
     assert args[:4] == ["/venv/python", "-m", "content_factory.agent_cli", "enqueue"]
     assert args[args.index("--category") + 1] == "стабилизаторы"
-    assert args[args.index("--due") + 1] == "сегодня 12:00"
+    assert "--due" not in args          # время — выход партии, генерация сразу
     assert json.loads(args[args.index("--quotas") + 1]) == {"ресанта": None}
     assert "--count" not in args
     assert kwargs["cwd"] == "/opt/cf"

@@ -165,3 +165,20 @@ def test_summary_for_status_and_report(tmp_path):
     assert "опубликовано сегодня — 1" in drafts_line(summary)
     text = build_report({}, [], None, 0, drafts=summary)
     assert "Опубликовано в канале: https://t.me/c/1/42" in text
+
+
+def test_post_with_time_waits_after_approval(tmp_path):
+    from datetime import datetime
+    store, factory, tg = Store(tmp_path / "o.db"), FakeFactory(), FakeTg()
+    draft = {**_draft(), "at": "18:00", "day": "2026-10-22"}
+    drafts.submit(store, factory, tg, CHAT, draft)
+    factory.status = {"status": "done", "path": "/out/a.png", "error": None}
+    drafts.poll(store, factory, tg, CHAT)
+    assert tg.sent[-1][1][0][0]["text"] == "✅ Опубликовать в канал 22.10 в 18:00"
+    n = store.get_draft("heat-pumps")["n"]
+    drafts.publish(store, factory, tg, CHAT, n, now=datetime(2026, 10, 22, 9, 0).timestamp())
+    assert factory.published == [] and "выйдет 22.10 в 18:00" in tg.sent[-1][0]
+    drafts.publish_scheduled(store, factory, tg, CHAT, datetime(2026, 10, 22, 17, 59).timestamp())
+    assert factory.published == []
+    drafts.publish_scheduled(store, factory, tg, CHAT, datetime(2026, 10, 22, 18, 0).timestamp())
+    assert len(factory.published) == 1 and store.get_draft(n)["status"] == "published"

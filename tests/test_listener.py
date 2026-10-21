@@ -309,3 +309,23 @@ def test_parent_alive_detects_running_and_missing_process():
     from listener.lifecycle import parent_alive
     assert parent_alive(os.getpid()) is True
     assert parent_alive(4_000_000) is False                 # такого PID нет
+
+
+def test_editorial_time_travels_with_draft(tmp_path):
+    day = tmp_path / "runs" / "2026-10-21"
+
+    def runner(cmd, **kw):
+        (day / "drafts").mkdir(parents=True, exist_ok=True)
+        (day / "verdicts").mkdir(exist_ok=True)
+        (day / "summary.md").write_text("Итог", encoding="utf-8")
+        (day / "drafts" / "d.json").write_text('{"id": "d", "channel": "tg_editorial", "title": "Т", "text": "А"}',
+                                               encoding="utf-8")
+        (day / "verdicts" / "d.json").write_text('{"ok": true}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    sent = []
+    worker = EditorialWorker(runner, lambda text, keyboard=None: None, root=tmp_path,
+                             today=lambda: "2026-10-21", submit_draft=sent.append)
+    worker.submit({"type": "run_editorial", "brief": "доставка", "channels": [], "at": "18:00", "day": None})
+    worker.join_idle(5)
+    assert sent[0]["at"] == "18:00"

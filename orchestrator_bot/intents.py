@@ -91,6 +91,9 @@ def normalize(intent: dict) -> tuple[str, list[dict]]:
         elif kind == "run_editorial":
             clean = {"type": "run_editorial", "brief": str(action.get("brief") or ""),
                      "channels": [c for c in action.get("channels") or [] if c in ("tg_editorial", "vk_editorial")]}
+            at = action.get("at")
+            if isinstance(at, str) and _TIME.match(at):    # «пост на вечер» — выход после ✅ в это время
+                clean.update(at=at, day=action.get("day") or None)
             clean = clean if clean["brief"] else None
         elif kind in ("revise_editorial", "redo_visual"):
             draft_id = str(action.get("draft_id") or "")

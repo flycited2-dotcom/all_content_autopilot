@@ -98,7 +98,7 @@ class EditorialWorker:
         self._post(summary.read_text(encoding="utf-8"))
         for draft in sorted((run_dir / "drafts").glob("*.json")):
             if draft.name not in before and self._accepted(run_dir, draft.stem):
-                self._deliver(draft)
+                self._deliver(draft, action)
 
     def _draft_day(self, draft_id) -> str:
         found = sorted((self.root / "runs").glob(f"*/drafts/{draft_id}.json"))
@@ -129,11 +129,15 @@ class EditorialWorker:
             text = f"⚠️ Контролёр не принял: {notes[-1] if notes else 'без пояснения'}\n\n{text}"
         self._post(text)
 
-    def _deliver(self, path):
-        """Принятая версия: на сервер (картинка и кнопка «Опубликовать»); без сервера — текстом, как раньше."""
+    def _deliver(self, path, action=None):
+        """Принятая версия: на сервер (картинка и кнопка «Опубликовать»); без сервера — текстом, как раньше.
+        Время выхода из задачи («пост на вечер») едет вместе с черновиком."""
         if self.submit_draft is not None:
             try:
-                self.submit_draft(json.loads(Path(path).read_text(encoding="utf-8")))
+                draft = json.loads(Path(path).read_text(encoding="utf-8"))
+                if action and action.get("at"):
+                    draft.update(at=action["at"], day=action.get("day"))
+                self.submit_draft(draft)
                 return
             except Exception:
                 log.exception("черновик %s не принят сервером — отправляю текстом", Path(path).stem)

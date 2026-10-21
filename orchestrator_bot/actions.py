@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from orchestrator_bot import drafts, feed
-from orchestrator_bot.intents import Outcome, Result
+from orchestrator_bot.intents import Outcome, Result, due_text
 
 
 def _names(items, limit=10) -> str:
@@ -20,7 +20,7 @@ def execute(outcome: Outcome, factory, store, msg_id) -> Result:
             return Result(outcome, f"ℹ️ По «{outcome.text}» новых позиций нет — всё уже в работе")
         log_id = store.log_action(msg_id, "enqueue", outcome.action, result)
         store.add_batch(log_id, outcome.action.get("category", ""), accepted, feed.publish_at(outcome.action))
-        when = f" к {outcome.action['at']}" if outcome.action.get("at") else ""
+        when = f" (выход пачкой: {due_text(outcome.action)})" if outcome.action.get("at") else ""
         return Result(outcome, f"✅ Поставил{when}: «{outcome.text}» — {len(accepted)} поз.{_names(result.get('items') or [])}",
                       log_id=log_id)
     if kind == "ask":

@@ -12,6 +12,8 @@ import re
 import time
 from datetime import datetime
 
+from orchestrator_bot import feed
+
 log = logging.getLogger("orchestrator_bot")
 
 CHANNELS = {"tg_editorial": "Telegram-канал", "vk_editorial": "группу ВК"}
@@ -24,8 +26,10 @@ def base_id(draft_id: str) -> str:
     return re.sub(r"-v\d+$", "", draft_id)
 
 
-def buttons(n: int, channel: str) -> list:
+def buttons(n: int, channel: str, publish_at: float | None = None) -> list:
     where = "в канал" if channel == "tg_editorial" else "в ВК-план"
+    if publish_at and channel == "tg_editorial":
+        where = datetime.fromtimestamp(publish_at).strftime("в канал %d.%m в %H:%M")
     return [[{"text": f"✅ Опубликовать {where}", "callback_data": f"d:p:{n}"},
              {"text": "❌ Отклонить", "callback_data": f"d:r:{n}"}],
             [{"text": "🖼 Другая картинка", "callback_data": f"d:v:{n}"},
@@ -46,6 +50,9 @@ def submit(store, factory, tg, chat_id, draft: dict) -> dict:
     if not store.add_draft(draft, base_id(draft["id"])):
         return {"ok": True, "new": False}
     row = store.get_draft(draft["id"])
+    when = feed.publish_at(draft) if draft.get("at") else None
+    if when:                                          # «пост на вечер»: после ✅ ждёт этого времени
+        store.update_draft(row["n"], publish_at=when)
     carried = store.sibling_prompt(row["base"], row["id"], WISH_MARKER)
     if carried:                                       # пожелания к картинке прошлой версии не теряем
         store.update_draft(row["n"], visual_prompt=carried)
@@ -114,15 +121,36 @@ def _preview(store, factory, tg, chat_id, row, path):
     else:
         tg.send_photo(chat_id, path)
         control = f"{text}\n\n👆 Пост для группы ВК готов.\nid: {row['id']}"
-    mid = tg.send(chat_id, control, buttons(row["n"], row["channel"]))
+    mid = tg.send(chat_id, control, buttons(row["n"], row["channel"], row.get("publish_at")))
     store.update_draft(row["n"], status="ready", image_path=path, control_message_id=mid)
 
 
-def publish(store, factory, tg, chat_id, n: int) -> None:
+def publish(store, factory, tg, chat_id, n: int, now: float | None = None) -> None:
     row = store.get_draft(n)
+    now = time.time() if now is None else now
+    if row is not None and row.get("publish_at") and row["publish_at"] > now:
+        if store.move_draft(n, ("ready",), "scheduled"):
+            _clear(tg, chat_id, row)
+            when = datetime.fromtimestamp(row["publish_at"]).strftime("%d.%m в %H:%M")
+            tg.send(chat_id, f"✅ «{row['title']}» выйдет {when}, как вы просили.")
+        else:
+            tg.send(chat_id, _already(row))
+        return
     if row is None or not store.move_draft(n, ("ready",), "publishing"):
         tg.send(chat_id, _already(row))
         return
+    _publish_now(store, factory, tg, chat_id, row)
+
+
+def publish_scheduled(store, factory, tg, chat_id, now: float) -> None:
+    """Из тика бота: одобренные посты, чьё время пришло."""
+    for row in store.drafts_with_status("scheduled"):
+        if row["publish_at"] and row["publish_at"] <= now and store.move_draft(row["n"], ("scheduled",), "publishing"):
+            _publish_now(store, factory, tg, chat_id, row)
+
+
+def _publish_now(store, factory, tg, chat_id, row) -> None:
+    n = row["n"]
     try:
         text = final_text(store, factory, row)
         if row["channel"] == "tg_editorial":
@@ -196,6 +224,7 @@ def _clear(tg, chat_id, row):
 
 
 _STATE = {"published": "уже опубликован", "publishing": "уже публикуется", "rejected": "уже отклонён",
+          "scheduled": "уже одобрен и ждёт своего времени",
           "superseded": "опубликована другая версия", "visual": "картинка ещё рисуется"}
 
 
