@@ -56,6 +56,18 @@ def cancel_logged(log_ref, factory, store, msg_id) -> str:
     return "\n".join(lines)
 
 
+def restore_logged(log_ref, factory, store) -> Result:
+    """«Вернуть» после случайной отмены: та же задача ставится заново (отменённые позиции свободны)."""
+    try:
+        entry = store.get_log(int(log_ref))
+    except (TypeError, ValueError):
+        entry = None
+    if not entry or entry["kind"] != "enqueue":
+        return Result(Outcome("not_found", {}, ""), "❌ Не нашёл, что вернуть")
+    action = entry["payload"]
+    return execute(Outcome("enqueue", action, action.get("category", "")), factory, store, entry["msg_id"])
+
+
 _NOT_CANCELLED = {
     "preview": "уже на превью в канале проверки: отменять поздно, отклоните кнопкой ❌ там",
     "rejected": "уже отклонены вами в канале проверки — в работе их нет",

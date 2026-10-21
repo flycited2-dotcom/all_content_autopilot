@@ -189,7 +189,11 @@ def _callback(deps, cq):
             what = "картинке" if kind == "visual" else "тексте"
             deps.tg.send(chat_id, f"Напишите или надиктуйте, что изменить в {what} «{row['title']}».")
     elif data.startswith("c:"):
-        deps.tg.send(chat_id, actions.cancel_logged(data[2:], deps.factory, deps.store, None))
+        deps.tg.send(chat_id, actions.cancel_logged(data[2:], deps.factory, deps.store, None),
+                     [[{"text": "↩️ Вернуть", "callback_data": f"u:{data[2:]}"}]])   # случайная отмена — одним нажатием
+    elif data.startswith("u:"):
+        text, keyboard = intents.render("", [actions.restore_logged(data[2:], deps.factory, deps.store)])
+        deps.tg.send(chat_id, text, keyboard)
     elif data.startswith("a:"):
         _, ask_id, n = data.split(":")
         ask = deps.store.get_ask(int(ask_id))

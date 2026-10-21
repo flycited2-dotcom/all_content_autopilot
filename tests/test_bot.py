@@ -322,3 +322,14 @@ def test_edit_text_button_routes_next_message_to_revision(deps):
     bot.handle_update({"update_id": 3, "message": {"message_id": 6, "chat": {"id": OWNER}, "from": {"id": OWNER},
                                                    "text": "а теперь просто вопрос"}}, deps)
     assert deps.store.claim_next(NOW)["text"] == "а теперь просто вопрос"   # ожидание одноразовое
+
+
+def test_restore_button_after_accidental_cancel(deps):
+    log_id = deps.store.log_action(1, "enqueue", {"type": "enqueue_products", "category": "кондиционеры", "count": 2,
+                                                  "quotas": {}, "at": None, "day": None}, {"accepted": ["k0", "k1"]})
+    bot.handle_update(_cb(f"c:{log_id}"), deps)
+    sent = [c for c in deps.tg.calls if c[0] == "send"][-1]
+    assert sent[3] == [[{"text": "↩️ Вернуть", "callback_data": f"u:{log_id}"}]]
+    bot.handle_update(_cb(f"u:{log_id}"), deps)
+    assert deps.factory.enqueued[-1]["category"] == "кондиционеры"
+    assert "Поставил" in deps.tg.texts()[-1]
