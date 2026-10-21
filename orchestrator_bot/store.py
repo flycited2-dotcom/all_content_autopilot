@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS actions_log (
 CREATE TABLE IF NOT EXISTS asks (
     id INTEGER PRIMARY KEY, msg_id INTEGER, action TEXT, options TEXT, used INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS batches (
+    log_id INTEGER PRIMARY KEY, category TEXT, keys TEXT, publish_at REAL,
+    status TEXT NOT NULL DEFAULT 'open', created REAL, updated REAL);
 CREATE TABLE IF NOT EXISTS drafts (
     n INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, base TEXT, channel TEXT, title TEXT, text TEXT,
     visual_prompt TEXT, image_job INTEGER, image_path TEXT, status TEXT NOT NULL DEFAULT 'new',
@@ -157,6 +160,31 @@ class Store:
         value = self.get_meta("heartbeat")
         return float(value) if value else None
 
+
+    # ── партии товаров: одна задача — одна публикация в Telegram пачкой ──
+    def add_batch(self, log_id: int, category: str, keys: list[str], publish_at: float | None, now=None):
+        now = now or time.time()
+        with self._c() as db:
+            db.execute("INSERT OR IGNORE INTO batches(log_id, category, keys, publish_at, created, updated) "
+                       "VALUES(?,?,?,?,?,?)", (log_id, category, json.dumps(keys, ensure_ascii=False),
+                                               publish_at, now, now))
+
+    def batches(self, status: str) -> list[dict]:
+        with self._c() as db:
+            rows = db.execute("SELECT * FROM batches WHERE status=? ORDER BY log_id", (status,)).fetchall()
+        return [{**dict(r), "keys": json.loads(r["keys"])} for r in rows]
+
+    def get_batch(self, log_id: int) -> dict | None:
+        with self._c() as db:
+            r = db.execute("SELECT * FROM batches WHERE log_id=?", (log_id,)).fetchone()
+        return {**dict(r), "keys": json.loads(r["keys"])} if r else None
+
+    def move_batch(self, log_id: int, src: tuple, dst: str, now=None) -> bool:
+        marks = ",".join("?" for _ in src)
+        with self._c() as db:
+            cur = db.execute(f"UPDATE batches SET status=?, updated=? WHERE log_id=? AND status IN ({marks})",
+                             (dst, now or time.time(), log_id, *src))
+        return cur.rowcount == 1
 
     # ── черновики оркестратора (этап 3) ──
     def add_draft(self, draft: dict, base: str, now=None) -> bool:

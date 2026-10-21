@@ -1,7 +1,7 @@
 """Исполнение исходов (общий код для API слушателя и кнопок Telegram)."""
 from __future__ import annotations
 
-from orchestrator_bot import drafts
+from orchestrator_bot import drafts, feed
 from orchestrator_bot.intents import Outcome, Result
 
 
@@ -19,6 +19,7 @@ def execute(outcome: Outcome, factory, store, msg_id) -> Result:
         if not accepted:
             return Result(outcome, f"ℹ️ По «{outcome.text}» новых позиций нет — всё уже в работе")
         log_id = store.log_action(msg_id, "enqueue", outcome.action, result)
+        store.add_batch(log_id, outcome.action.get("category", ""), accepted, feed.publish_at(outcome.action))
         when = f" к {outcome.action['at']}" if outcome.action.get("at") else ""
         return Result(outcome, f"✅ Поставил{when}: «{outcome.text}» — {len(accepted)} поз.{_names(result.get('items') or [])}",
                       log_id=log_id)
@@ -47,6 +48,7 @@ def cancel_logged(log_ref, factory, store, msg_id) -> str:
     keys = entry["result"].get("accepted") or []
     result = factory.cancel(keys)
     store.log_action(msg_id, "cancel", {"log_id": entry["id"], "keys": keys}, result)
+    store.move_batch(entry["id"], ("open", "ready", "approved"), "closed")
     lines = [f"↩️ Отменено: {result.get('cancelled', 0)}"]
     by_status: dict[str, int] = {}
     for item in result.get("not_cancelled") or []:

@@ -174,13 +174,16 @@ def _callback(deps, cq):
         except Exception as exc:
             deps.tg.send(chat_id, f"❌ Запустить не удалось: {exc.__class__.__name__}")
     elif data == "f:show":
-        found = feed.digest(deps.factory, deps.store)
+        found = feed.digest(deps.factory, deps.store, deps.clock())
         deps.tg.send(chat_id, *(found or ("🗂 Решать сейчас нечего — всё разобрано.", None)))
     elif data in ("f:tg", "f:vk", "f:old"):
         try:
             deps.tg.send(chat_id, feed.act(deps.factory, data[2:]))
         except Exception as exc:
             deps.tg.send(chat_id, f"❌ Не получилось: {exc.__class__.__name__}")
+    elif data.startswith("b:"):                      # партия товаров: опубликовать пачкой / не публиковать
+        _, op, log_id = data.split(":")
+        feed.batch_action(deps, chat_id, op, int(log_id))
     elif data.startswith("d:"):                      # этап 3: черновик — опубликовать / отклонить / ещё картинку
         _, op, n = data.split(":")
         if op == "p":

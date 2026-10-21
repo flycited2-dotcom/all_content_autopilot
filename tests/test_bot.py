@@ -339,40 +339,75 @@ class FeedFactory(FakeFactory):
     def __init__(self):
         super().__init__()
         self.calls = []
+        self.status_by_call = []
 
     def feed(self):
-        return {"tg": {"fresh": 3, "stale": 553, "pending": 560, "queued": 0}, "vk_review": 8,
-                "review_url": "https://t.me/c/1/999999999", "fresh_hours": 72, "stale_days": 7}
+        return {"tg": {"fresh": 3, "stale": 553, "pending": 560}, "vk_review": 8,
+                "review_url": None, "fresh_hours": 72, "stale_days": 7}
 
     def approve_fresh(self):
-        self.calls.append("tg")
-        return {"queued": 3}
+        self.calls.append("fresh")
+        return {"published": ["a", "b", "c"], "failed": []}
 
-    def publish_next(self):
-        self.calls.append("next")
-        return {"published": "k", "left": 2}
+    def batch_status(self, keys):
+        return self.status_by_call.pop(0)
+
+    def publish_keys(self, keys):
+        self.calls.append(("publish", tuple(keys)))
+        return {"published": list(keys), "failed": []}
 
 
 def test_feed_digest_buttons_and_actions(deps):
     deps.factory = FeedFactory()
     bot.handle_update(_cb("f:show"), deps)
     send = [c for c in deps.tg.calls if c[0] == "send"][-1]
-    assert "свежих 3" in send[2] and "устаревших (старше 7 дн.) — 553" in send[2] and "ВК-план на проверке: 8" in send[2]
-    assert [row[0].get("callback_data") for row in send[3]] == ["f:tg", "f:vk", "f:old", None]
+    assert "Свежих товарных превью в группе проверки: 3" in send[2] and "ВК-план на проверке: 8" in send[2]
+    assert [row[0].get("callback_data") for row in send[3]] == ["f:tg", "f:old", "f:vk"]
     bot.handle_update(_cb("f:tg"), deps)
-    assert deps.factory.calls == ["tg"] and "В очереди: 3" in deps.tg.texts()[-1]
+    assert deps.factory.calls == ["fresh"] and "опубликовано в канале 3" in deps.tg.texts()[-1]
 
 
-def test_feed_tick_digest_once_and_queue_every_30_min(deps):
+def _batch(deps, at=None, day=None):
+    from orchestrator_bot import feed
+    log_id = deps.store.log_action(1, "enqueue", {"category": "холодильники"}, {"accepted": ["k1", "k2"]})
+    deps.store.add_batch(log_id, "холодильники", ["k1", "k2"], feed.publish_at({"at": at, "day": day}))
+    return log_id
+
+
+def test_batch_ready_notice_then_publish_whole_batch_now(deps):
+    from orchestrator_bot import feed
+    deps.factory = FeedFactory()
+    log_id = _batch(deps)
+    deps.factory.status_by_call = [{"total": 2, "ready": 1, "in_work": 1, "published": 0, "dropped": 0},
+                                   {"total": 2, "ready": 2, "in_work": 0, "published": 0, "dropped": 0}]
+    feed.tick(deps, NOW)
+    assert not any("Партия" in t for t in deps.tg.texts())        # ещё генерируется — молчим
+    feed.tick(deps, NOW + feed.POLL_EVERY + 1)
+    notice = [c for c in deps.tg.calls if c[0] == "send"][-1]
+    assert "📦 Партия «холодильники» готова: 2 карточек" in notice[2]
+    assert notice[3][0][0] == {"text": "✅ Опубликовать пачкой сейчас", "callback_data": f"b:p:{log_id}"}
+    bot.handle_update(_cb(f"b:p:{log_id}"), deps)
+    bot.handle_update(_cb(f"b:p:{log_id}"), deps)                   # повторное нажатие — не второй раз
+    assert deps.factory.calls == [("publish", ("k1", "k2"))]
+    assert "Партия «холодильники»: опубликовано в канале 2" in deps.tg.texts()[-2]
+
+
+def test_batch_with_planned_time_waits_for_it(deps):
     from datetime import datetime
     from orchestrator_bot import feed
     deps.factory = FeedFactory()
-    t0 = datetime(2026, 10, 22, 9, 31).timestamp()
-    feed.tick(deps, t0)
-    feed.tick(deps, t0 + 60)
-    assert sum("Ждут вашего решения" in t for t in deps.tg.texts()) == 1
-    assert deps.factory.calls == ["next"]                       # вторая публикация — не раньше 30 минут
-    feed.tick(deps, t0 + 1801)
-    assert deps.factory.calls == ["next", "next"]
-    feed.tick(deps, datetime(2026, 10, 22, 22, 0).timestamp())  # ночью очередь стоит
-    assert deps.factory.calls == ["next", "next"]
+    deps.clock = lambda: datetime(2026, 10, 22, 9, 0).timestamp()
+    log_id = _batch(deps, at="12:00", day="2026-10-22")
+    deps.store.move_batch(log_id, ("open",), "ready")
+    bot.handle_update(_cb(f"b:p:{log_id}"), deps)
+    assert "выйдет 22.10 в 12:00" in deps.tg.texts()[-1] and deps.factory.calls == []
+    feed.tick(deps, datetime(2026, 10, 22, 11, 59).timestamp())
+    assert deps.factory.calls == []
+    feed.tick(deps, datetime(2026, 10, 22, 12, 0).timestamp())
+    assert deps.factory.calls == [("publish", ("k1", "k2"))]
+
+
+def test_cancel_closes_batch(deps):
+    log_id = _batch(deps)
+    bot.handle_update(_cb(f"c:{log_id}"), deps)
+    assert deps.store.get_batch(log_id)["status"] == "closed"

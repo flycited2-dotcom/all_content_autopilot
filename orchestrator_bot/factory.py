@@ -93,8 +93,11 @@ class Factory:
     def vk_approve(self) -> dict:
         return self._run("vk-approve")
 
-    def publish_next(self) -> dict:
-        return self._run("publish-next")
+    def batch_status(self, keys: list[str]) -> dict:
+        return self._run("batch-status", "--keys", ",".join(keys))
+
+    def publish_keys(self, keys: list[str]) -> dict:
+        return self._run("publish-keys", "--keys", ",".join(keys))
 
     # ── этап 3: посты оркестратора ──
     def visual_submit(self, scene: str, request_key: str, new: bool = False) -> dict:
