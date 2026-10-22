@@ -97,6 +97,53 @@ def test_ready_only_checks_local_auth_without_network(make_provider):
     assert calls == []
 
 
+def finalized_text(text=INTENT, output_index=0, content_index=0, item_id="msg_test"):
+    return {"type": "response.output_text.done", "output_index": output_index, "content_index": content_index,
+            "item_id": item_id, "text": text}
+
+
+def test_chatgpt_finalized_text_with_empty_completed_output(make_provider):
+    stream = sse(finalized_text()) + sse({"type": "response.completed", "response": {"status": "completed", "output": []}})
+    provider, _ = make_provider(response=httpx.Response(200, content=stream))
+    assert provider.complete("JSON only", {}) == INTENT
+
+
+@pytest.mark.parametrize("ending", [None, {"type": "response.failed", "response": {"error": {"code": "subscription_sharing_usage_limit_exceeded"}}},
+                                     {"type": "response.incomplete", "response": {"status": "incomplete"}}])
+def test_finalized_part_is_not_success_without_completed(make_provider, ending):
+    stream = sse(finalized_text()) + (sse(ending) if ending else b"")
+    provider, _ = make_provider(response=httpx.Response(200, content=stream))
+    with pytest.raises(ProviderError):
+        provider.complete("JSON only", {})
+
+
+def test_terminal_output_and_text_done_are_not_concatenated_twice(make_provider):
+    provider, _ = make_provider(response=httpx.Response(200, content=sse(finalized_text()) + sse(completed())))
+    assert provider.complete("JSON only", {}) == INTENT
+
+
+def test_finalized_parts_are_joined_in_output_order(make_provider):
+    stream = sse(finalized_text("B", 1, item_id="msg_b")) + sse(finalized_text("A", 0, item_id="msg_a"))
+    stream += sse({"type": "response.completed", "response": {"status": "completed", "output": []}})
+    provider, _ = make_provider(response=httpx.Response(200, content=stream))
+    assert provider.complete("text only", {}) == "AB"
+
+
+@pytest.mark.parametrize("part", [{"output_index": True}, {"content_index": -1}, {"text": 123}, {"item_id": None}])
+def test_malformed_finalized_part_is_rejected(make_provider, part):
+    stream = sse({**finalized_text(), **part}) + sse(completed())
+    provider, _ = make_provider(response=httpx.Response(200, content=stream))
+    with pytest.raises(ProviderError):
+        provider.complete("JSON only", {})
+
+
+def test_conflicting_finalized_parts_are_rejected(make_provider):
+    stream = sse(finalized_text()) + sse(finalized_text("other")) + sse(completed())
+    provider, _ = make_provider(response=httpx.Response(200, content=stream))
+    with pytest.raises(ProviderError):
+        provider.complete("JSON only", {})
+
+
 @pytest.mark.parametrize("model", ["first", "hidden"])
 def test_explicit_model_must_be_in_account_catalog(make_provider, model):
     provider, calls = make_provider(model=model)

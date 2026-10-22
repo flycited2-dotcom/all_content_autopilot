@@ -231,6 +231,7 @@ class ChatGPTProvider:
             body = {"model": self._model(token), "instructions": instructions, "input": inputs,
                     "store": False, "stream": True}
             headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
+            finalized = {}
             with self.http.stream("POST", BASE_URL + "/responses", json=body, headers=headers,
                                   timeout=TIMEOUT, follow_redirects=False) as response:
                 if not 200 <= response.status_code < 300:
@@ -249,6 +250,20 @@ class ChatGPTProvider:
                         raise _failure()
                     if kind in ("response.failed", "response.incomplete", "error"):
                         raise _failure(body=event, retry_after=response.headers.get("Retry-After"), now=self.clock())
+                    if kind == "response.output_text.done":
+                        # ChatGPT plan streams can finalize text here, then send completed.output=[].
+                        # Keep finalized parts, but never return them until response.completed arrives.
+                        output_index, content_index = event.get("output_index"), event.get("content_index")
+                        if (type(output_index) is not int or output_index < 0 or
+                                type(content_index) is not int or content_index < 0 or
+                                not isinstance(event.get("text"), str) or
+                                not isinstance(event.get("item_id"), str)):
+                            raise _failure()
+                        key = (output_index, content_index)
+                        part = (event["item_id"], event["text"])
+                        if key in finalized and finalized[key] != part:
+                            raise _failure()
+                        finalized[key] = part
                     if kind == "response.completed":
                         result = event.get("response")
                         if not isinstance(result, dict) or result.get("status", "completed") != "completed":
@@ -267,6 +282,8 @@ class ChatGPTProvider:
                                 if isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
                                     parts.append(part["text"])
                         text = "".join(parts)
+                        if not output and finalized:
+                            text = "".join(finalized[key][1] for key in sorted(finalized))
                         if not text.strip():
                             raise _failure()
                         return text
