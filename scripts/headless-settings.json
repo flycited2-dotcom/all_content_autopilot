@@ -17,6 +17,7 @@
       "Read(~/.ssh/**)",
       "Read(~/.claude/**)",
       "Read(~/.codex/**)",
+      "Read(/runs/private/**)",
       "Read(**/.env*)"
     ]
   }

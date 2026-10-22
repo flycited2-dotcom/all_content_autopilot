@@ -44,7 +44,7 @@ def test_run_turn_uses_resume_for_existing_session(tmp_path):
 
 
 def test_run_turn_starts_session_when_resume_fails(tmp_path):
-    run, calls = _claude([(1, ""), (0, '{"reply": "ок", "actions": []}')])
+    run, calls = _claude([(1, "No conversation found with session ID u-2"), (0, '{"reply": "ок", "actions": []}')])
     brain.run_turn({"message": {"id": 6, "text": "x"}, "context": {}}, ("u-2", False), runner=run, root=tmp_path)
     assert "--session-id" in calls[1][0]
 
@@ -65,7 +65,7 @@ class FakeApi:
 
     def intent(self, message_id, intent):
         self.intents.append((message_id, intent))
-        return {"ok": True, "editorial": intent.get("_editorial", [])}
+        return {"ok": True, "editorial": getattr(self, "editorial", {}).get(message_id, [])}
 
     def reply(self, text, keyboard=None):
         self.replies.append(text)
@@ -81,10 +81,9 @@ def test_editorial_does_not_block_chat(tmp_path):
         return SimpleNamespace(returncode=0, stdout="{}", stderr="")
 
     api = FakeApi([{"id": 1, "text": "сделай пост"}, {"id": 2, "text": "статус?"}])
+    api.editorial = {1: [{"type": "run_editorial", "brief": "насосы", "channels": []}]}
     worker = EditorialWorker(slow_runner, api.reply, root=tmp_path)
-    turn = lambda payload, sess: {"reply": "ок", "actions": [],
-                                  "_editorial": [{"type": "run_editorial", "brief": "насосы", "channels": []}]
-                                  if payload["message"]["id"] == 1 else []}
+    turn = lambda payload, sess: {"reply": "ок", "actions": []}
     process_once(api, worker, turn, ("u", False))
     assert started.wait(2)
     process_once(api, worker, turn, ("u", False))           # редакционный прогон ещё идёт
