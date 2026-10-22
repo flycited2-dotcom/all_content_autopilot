@@ -70,6 +70,26 @@ class Store:
             row = db.execute("SELECT response FROM messages WHERE id=?", (msg_id,)).fetchone()
         return json.loads(row[0]) if row and row[0] else None
 
+    def record_exchange(self, text: str, reply: str):
+        """Ответ кнопкой, исполненный без модели; сразу завершён, не попадает в очередь."""
+        with self._c() as db:
+            db.execute("INSERT INTO messages(kind,text,status,created,intent_done,response) VALUES(?,?,'done',?,1,?)",
+                       ("callback", text, time.time(), json.dumps({"reply": reply}, ensure_ascii=False)))
+
+    def dialogue_before(self, msg_id: int, limit=6) -> list[dict]:
+        """История только до текущей команды, включая фактические ответы сервера."""
+        with self._c() as db:
+            rows = db.execute("SELECT text,response FROM messages WHERE id < ? AND status='done' "
+                              "AND response IS NOT NULL ORDER BY id DESC LIMIT ?", (msg_id, limit)).fetchall()
+        history = []
+        for row in reversed(rows):
+            reply = json.loads(row["response"]).get("reply")
+            if not isinstance(reply, str):
+                continue  # старые версии API сохраняли только ok/editorial
+            history.extend([{"role": "user", "content": (row["text"] or "")[:4000]},
+                            {"role": "assistant", "content": reply[:8000]}])
+        return history
+
     def set_transcript(self, msg_id, text):
         with self._c() as db:
             db.execute("UPDATE messages SET text=? WHERE id=?", (text, msg_id))

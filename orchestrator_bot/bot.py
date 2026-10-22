@@ -218,7 +218,9 @@ def _callback(deps, cq):
             _queue(deps, chat_id, None, "text", f"Ответ на вопрос «{action.get('question', '')}»: {option}")
             return
         if option == "Отмена":
-            deps.tg.send(chat_id, "Хорошо, не ставлю.")
+            text = "Хорошо, не ставлю."
+            deps.store.record_exchange(f"Ответ на выбор количества «{action['category']}»: {option}", text)
+            deps.tg.send(chat_id, text)
             return
         count = deps.threshold if option.startswith("Первые") else int(option.split()[-1])
         result = actions.execute(Outcome("enqueue", {**action, "count": count}, action["category"]),
@@ -227,6 +229,7 @@ def _callback(deps, cq):
         if result.log_id is not None and (warning := workers.note(deps.factory)):
             results.append(warning)
         text, keyboard = intents.render("", results)
+        deps.store.record_exchange(f"Ответ на выбор количества «{action['category']}»: {option}", text)
         deps.tg.send(chat_id, text, keyboard)
 
 

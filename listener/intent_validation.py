@@ -48,8 +48,10 @@ def validated_intent(value) -> dict:
             raise ValueError("Неизвестное действие")
         kind = action["type"]
         allowed = {"type"}
-        if kind == "enqueue_products":
-            allowed.update(("category", "count", "quotas", "source", "btu", "min_temp", "at", "day", "inverter", "heat_pump", "full_dc"))
+        if kind in ("enqueue_products", "list_products"):
+            allowed.update(("category", "count", "quotas", "source", "btu", "min_temp", "inverter", "heat_pump", "full_dc"))
+            if kind == "enqueue_products":
+                allowed.update(("at", "day"))
             if not _text(action.get("category"), 160):
                 raise ValueError("Нет категории")
             count = action.get("count")

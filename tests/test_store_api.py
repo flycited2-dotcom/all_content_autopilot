@@ -136,6 +136,7 @@ def test_next_includes_catalog_hint_and_marks_claimed(server):
     out = _call(base, "GET", "/next")
     assert out["message"]["text"] == "привет"
     assert out["context"]["hint"] == factory.hint()
+    assert "list_products" in out["context"]["capabilities"]
     assert _call(base, "GET", "/next")["message"] is None
 
 
@@ -226,3 +227,51 @@ def test_next_context_includes_content_agent_state(server):
     factory.worker_state = {"generation": False, "agent_online": True, "last_seen": None, "lanes": [], "commands": {}}
     store.add_message(32, "text", "почему не генерируется?")
     assert "генерация выключена" in _call(base, "GET", "/next")["context"]["workers"]
+
+
+def test_catalog_lists_all_models_without_enqueue_or_quantity_question(server):
+    store, factory, sent, base = server
+    items = [{"name": f"Холодильник Модель-{i:03d} " + "🧊" * 50} for i in range(47)]
+    factory.resolve = lambda action: {"total_matches": 47, "items": items}
+    msg = store.add_message(40, "text", "Покажи мне все модели")
+    result = _call(base, "POST", "/intent", {"message_id": msg, "intent": {
+        "reply": "Показываю холодильники.", "actions": [{"type": "list_products", "category": "холодильники"}]}})
+    assert len(sent) > 1
+    text = "".join(t for t, _ in sent)
+    assert all(item["name"] in text for item in items)
+    assert text == result["reply"]
+    assert all(len(t.encode("utf-16-le")) // 2 <= 3800 for t, _ in sent)
+    assert not any(kb for _, kb in sent)
+    assert factory.enqueued == [] and store.batches("open") == []
+    assert store.actions_since(0) == []
+    again = _call(base, "POST", "/intent", {"message_id": msg, "intent": {"reply": "", "actions": []}})
+    assert again["duplicate"] and len(sent) > 1 and again["reply"] == text
+
+
+def test_next_history_includes_actual_quantity_question_and_button_exchange(server):
+    store, factory, sent, base = server
+    factory.total = 47
+    first = store.add_message(41, "voice", "Поставь холодильники в генерацию")
+    _call(base, "POST", "/intent", {"message_id": first, "intent": _enqueue_intent()})
+    second = store.add_message(42, "text", "Покажи мне все модели")
+    # Даже если более поздний ответ уже записан, он не должен попасть в прошлое.
+    store.record_exchange("Выбор: Все 47", "Поставил холодильники: 47 поз.")
+    out = _call(base, "GET", "/next")
+    assert out["message"]["id"] == second
+    assert out["context"]["history"] == [
+        {"role": "user", "content": "Поставь холодильники в генерацию"},
+        {"role": "assistant", "content": sent[-1][0]}]
+    assert "47 позиций — сколько ставить?" in out["context"]["history"][1]["content"]
+    third = store.add_message(43, "text", "что поставлено?")
+    assert store.dialogue_before(third)[-2:] == [
+        {"role": "user", "content": "Выбор: Все 47"},
+        {"role": "assistant", "content": "Поставил холодильники: 47 поз."}]
+
+
+def test_empty_catalog_does_not_enqueue(server):
+    store, factory, sent, base = server
+    factory.total = 0
+    msg = store.add_message(44, "text", "покажи холодильники")
+    _call(base, "POST", "/intent", {"message_id": msg, "intent": {
+        "reply": "", "actions": [{"type": "list_products", "category": "холодильники"}]}})
+    assert "Нет доступных" in sent[-1][0] and factory.enqueued == []

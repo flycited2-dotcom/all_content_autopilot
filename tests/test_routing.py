@@ -192,6 +192,30 @@ def test_saved_intent_cannot_bypass_validation(tmp_path):
     assert not api.calls and pending.path.exists()
 
 
+def test_router_prefers_actual_server_dialogue_to_local_intents(tmp_path):
+    root_prompt(tmp_path)
+    captured = []
+    def primary(p, s):
+        captured.append(p)
+        return {"reply": "Показываю холодильники.", "actions": [{"type": "list_products", "category": "холодильники"}]}
+    router = ModelRouter(tmp_path, claude=primary, chatgpt=Backup(), clock=lambda: 1000)
+    router.state["history"] = [{"role": "assistant", "content": "Старая команда"}]
+    current = payload(text="Покажи мне все модели")
+    current["context"]["history"] = [
+        {"role": "user", "content": "Поставь холодильники в генерацию"},
+        {"role": "assistant", "content": "По холодильникам нашлось 47 позиций — сколько ставить?"}]
+    result = router.run_turn(current, ("u", False))
+    assert captured[0]["context"]["history"] == current["context"]["history"]
+    assert router.state["history"][:2] == current["context"]["history"]
+    assert result["actions"][0]["type"] == "list_products"
+
+
+@pytest.mark.parametrize("extra", [{"count": "47"}, {"at": "12:00"}, {"day": "сегодня"}, {"category": ""}])
+def test_catalog_action_rejects_bad_filters_and_scheduling(extra):
+    with pytest.raises(ValueError):
+        validated_intent({"reply": "", "actions": [{"type": "list_products", "category": "холодильники", **extra}]})
+
+
 def test_retry_signal_reaches_live_router(tmp_path):
     root_prompt(tmp_path)
     calls = []

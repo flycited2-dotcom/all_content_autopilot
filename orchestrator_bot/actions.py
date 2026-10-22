@@ -13,6 +13,21 @@ def _names(items, limit=10) -> str:
 
 def execute(outcome: Outcome, factory, store, msg_id) -> Result:
     kind = outcome.kind
+    if kind == "list_products":
+        found = factory.resolve(outcome.action)
+        items = found.get("items") or []
+        category = outcome.action["category"]
+        if not items:
+            return Result(outcome, f"Нет доступных для генерации позиций: «{category}».")
+        lines = [f"Доступны для генерации: «{category}» — {len(items)} поз."]
+        for n, item in enumerate(items, 1):
+            name = item.get("name") or item.get("key") or "Название не передано источником"
+            lines.append(f"{n}. {name}")
+        total = int(found.get("total_matches") or 0)
+        if total > len(items):
+            lines.append(f"Показано {len(items)} из {total} совпадений по заданному отбору.")
+        lines.append("В генерацию ничего не добавлено.")
+        return Result(outcome, "\n".join(lines))
     if kind == "enqueue":
         result = factory.enqueue(outcome.action)
         accepted = result.get("accepted") or []

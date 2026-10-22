@@ -107,7 +107,9 @@ class ModelRouter:
     def _payload(self, payload):
         value = json.loads(json.dumps(payload, ensure_ascii=False))
         context = value.setdefault("context", {})
-        context["history"] = self.state["history"][-12:]
+        # Сервер знает реальные вопросы/результаты и ответы кнопками. Локальная
+        # история нужна при работе со старым сервером и при первом обновлении.
+        context["history"] = (context.get("history") or self.state["history"])[-12:]
         context["routing"] = {"now": datetime.fromtimestamp(self.clock(), MOSCOW).isoformat(),
                               "claude_available": not self._blocked("claude")}
         match = re.search(r"\[ответ на черновик id: ([A-Za-z0-9_-]{1,80})\]", str(value["message"].get("text", "")))
@@ -149,7 +151,7 @@ class ModelRouter:
             previous = self.state.get("active")
             self.state["active"] = name
             if self.state.get("last_message_id") != message_id:
-                history = self.state["history"] + [
+                history = enriched["context"]["history"] + [
                     {"role": "user", "content": str(payload["message"].get("text", ""))[:4000]},
                     {"role": "assistant", "content": json.dumps(intent, ensure_ascii=False)[:4000]}]
                 self.state["history"] = history[-12:]

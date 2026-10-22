@@ -14,6 +14,20 @@ log = logging.getLogger("orchestrator_bot")
 EDITORIAL = ("run_editorial", "revise_editorial")
 
 
+def text_chunks(text: str, maximum=3800):
+    """Не обрезать длинные списки; лимит учитывает пары UTF-16 для эмодзи."""
+    chunk, size = [], 0
+    for char in text:
+        width = 2 if ord(char) > 0xFFFF else 1
+        if size + width > maximum:
+            yield "".join(chunk)
+            chunk, size = [], 0
+        chunk.append(char)
+        size += width
+    if chunk:
+        yield "".join(chunk)
+
+
 def start_of_day(now: float) -> float:
     return datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
@@ -46,10 +60,12 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
             results.append(warning)
     text, keyboard = intents.render(reply, results)
     try:
-        send(text or "Принял.", keyboard)
+        parts = list(text_chunks(text or "Принял."))
+        for n, part in enumerate(parts):
+            send(part, keyboard if n == len(parts) - 1 else [])
     except Exception:
         log.exception("ответ владельцу не отправлен")
-    response = {"ok": True, "editorial": editorial}
+    response = {"ok": True, "editorial": editorial, "reply": text or "Принял."}
     store.save_response(msg_id, response)
     store.mark_done(msg_id)
     return response
@@ -101,6 +117,8 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
                 except Exception:
                     agent = "состояние контент-агента неизвестно"
             self._json(200, {"message": message, "context": {"hint": hint, "workers": agent,
+                                                              "capabilities": ["list_products"],
+                                                              "history": store.dialogue_before(message["id"]) if message else [],
                                                               "today": store.actions_since(start_of_day(now))}})
 
         def do_POST(self):

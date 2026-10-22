@@ -143,6 +143,18 @@ def test_ask_callback_first_n_enqueues_n_once(deps):
     bot.handle_update(_cb(f"a:{ask_id}:0"), deps)
     bot.handle_update(_cb(f"a:{ask_id}:0"), deps)
     assert [a["count"] for a in deps.factory.enqueued] == [40]
+    assert deps.store.count_new() == 0
+    history = deps.store.dialogue_before(999)
+    assert len(history) == 2
+    assert "Первые 40" in history[0]["content"] and "Поставил" in history[1]["content"]
+
+
+def test_quantity_cancel_is_in_dialogue_without_enqueuing(deps):
+    action = {"type": "enqueue_products", "category": "холодильники"}
+    ask_id = deps.store.save_ask(1, action, ["Первые 40", "Все 47", "Отмена"])
+    bot.handle_update(_cb(f"a:{ask_id}:2"), deps)
+    assert deps.factory.enqueued == [] and deps.store.count_new() == 0
+    assert deps.store.dialogue_before(999)[-1]["content"] == "Хорошо, не ставлю."
 
 
 def test_build_hint_uses_catalog_only():
