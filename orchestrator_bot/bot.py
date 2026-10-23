@@ -39,7 +39,8 @@ def build_hint(hint: dict) -> str:
     parts = ["Задачи контент-завода: кондиционеры, сплит-системы, тепловые насосы, BTU, инверторные.",
              "Поставщики: Бриз (Breeze), СплитХаб, Сплит Хоум (сайт), БытТехОпт, АРУ."]
     if hint.get("brands"):
-        parts.append("Бренды: " + ", ".join(hint["brands"][:40]) + ".")
+        # ASR has a short prompt budget; the dialogue receives the complete catalog.
+        parts.append("Бренды: " + ", ".join((hint.get('voice_brands') or hint['brands'])[:40]) + ".")
     if hint.get("sources"):
         parts.append("Источники: " + ", ".join(hint["sources"]) + ".")
     return " ".join(parts)
@@ -82,9 +83,10 @@ def drafts_line(summary: dict) -> str:
 
 
 BTN_STATUS, BTN_REPORT, BTN_WIZARD ="📋 Статус", "🧾 Сводка", "🛠 Мастер задач"
-MAIN_KEYBOARD = [[BTN_STATUS, BTN_REPORT], [BTN_WIZARD]]
+BTN_CATALOG = '📚 Каталоги и товары'
+MAIN_KEYBOARD = [[BTN_STATUS, BTN_REPORT], [BTN_CATALOG, BTN_WIZARD]]
 BOT_COMMANDS = [("status", "Статус завода и контент-агента"), ("report", "Сводка за день"),
-                ("menu", "Показать кнопки")]
+                ("menu", "Показать кнопки"), ('catalog', 'Каталоги, источники и выбор товаров')]
 
 
 def _menu(deps, chat_id):
@@ -95,6 +97,24 @@ def _menu(deps, chat_id):
 
 def _wizard(deps, chat_id):
     deps.tg.send(chat_id, "Мастер задач — в боте конвейера:", [[{"text": BTN_WIZARD, "url": TASK_WIZARD_URL}]])
+
+
+def _catalog(deps, chat_id):
+    from orchestrator_bot.api import text_chunks
+    data = deps.factory.hint()
+    lines = ['📚 Подключённые каталоги']
+    for source in data.get('sources', []):
+        label = source.removeprefix('manual__').replace('_', ' ')
+        count = data.get('source_counts', {}).get(source)
+        lines.append(f'• {label}' + (f': {count} поз.' if count is not None else ''))
+    lines.append(f"Брендов: {len(data.get('brands', []))}.")
+    lines.append('Напишите или надиктуйте: «Холодильники», «Все холодильники Beko», '
+                 '«Выбери автоматически 7 телевизоров Xiaomi» или «Хочу выбрать модели сам». '
+                 'Система предложит все модели, нужное количество или ручной выбор.')
+    lines.append('Товары → дизайнер → проверка по производителю → исправления → превью. '
+                 'Публикация — после вашего подтверждения.')
+    for part in text_chunks('\n'.join(lines)):
+        deps.tg.send(chat_id, part)
 
 
 def _report(deps, chat_id):
@@ -128,6 +148,9 @@ def _take_note(deps, chat_id, text) -> str | None:
 
 
 def _queue(deps, chat_id, tg_message_id, kind, text):
+    from orchestrator_bot.selection_ui import handle_count
+    if handle_count(deps, chat_id, tg_message_id, text):
+        return
     if tg_message_id is not None:                    # живое сообщение владельца (не ответ на вопрос-кнопку)
         text = _take_note(deps, chat_id, text)
         if text is None:
@@ -160,12 +183,17 @@ def _voice(deps, chat_id, message):
 def _callback(deps, cq):
     chat_id = cq["message"]["chat"]["id"]
     data = cq.get("data") or ""
+    if not data.startswith('s:') and deps.store.get_meta('selection_await_count'):
+        deps.store.set_meta('selection_await_count', '')
     try:
         deps.tg.answer_callback(cq["id"])
     except Exception:                                # «query is too old» — кнопку всё равно исполняем
         log.info("answerCallbackQuery не прошёл", exc_info=True)
     if data == "m:status":
         deps.tg.send(chat_id, *status_message(deps))
+    elif data.startswith('s:'):
+        from orchestrator_bot.selection_ui import handle_callback
+        handle_callback(deps, chat_id, cq)
     elif data == "m:report":
         _report(deps, chat_id)
     elif data == "w:start":
@@ -263,6 +291,8 @@ def handle_update(update: dict, deps: Deps) -> None:
         _report(deps, chat_id)
     elif text == BTN_WIZARD:
         _wizard(deps, chat_id)
+    elif command == '/catalog' or text == BTN_CATALOG:
+        _catalog(deps, chat_id)
     else:
         _queue(deps, chat_id, message["message_id"], "text", _with_reply_context(message, text))
 

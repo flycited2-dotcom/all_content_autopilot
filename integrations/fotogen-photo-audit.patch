@@ -1,42 +1,124 @@
 --- a/remote_agent.py
 +++ b/remote_agent.py
-@@ -196,6 +196,9 @@
+@@ -74,6 +74,21 @@
+ from worker_lease_client import claim_lease  # noqa: E402
+ import upload_cooldown  # noqa: E402
+ import upload_outbox  # noqa: E402
++
++# PHOTO_AUDIT_BRIDGE_V2: local settings contain no credentials.
++AUDIT_ROOT = None
++class PhotoAuditHold(RuntimeError):
++    pass
++_audit_settings = ROOT / "photo-audit.json"
++if _audit_settings.exists():
++    _audit_config = json.loads(_audit_settings.read_text(encoding="utf-8-sig"))
++    if _audit_config.get("enabled") is True:
++        AUDIT_ROOT = Path(_audit_config["project_root"]).resolve()
++        if not (AUDIT_ROOT / "photo_auditor").is_dir():
++            raise RuntimeError("Photo auditor project is unavailable")
++        sys.path.insert(0, str(AUDIT_ROOT))
++        from photo_auditor.integration import AuditHold as PhotoAuditHold, checked_output
++        from photo_auditor.runtime import register_job, requires_audit, guard_upload
+ 
+ # Кулдаун при «Максимальное количество загрузок» — persistентный файл (переживает
+ # рестарт процесса/ПК), см. upload_cooldown.py. Retry-шторм 2026-07-03 не давал
+@@ -196,6 +211,8 @@
  
  
  async def _upload_result(api_url: str, job_id: int, output_path: Path) -> dict:
-+    if os.environ.get("PHOTO_AUDIT_ENABLED") == "1":
-+        from photo_auditor.integration import require_permit
-+        require_permit(Path(os.environ["PHOTO_AUDIT_ROOT"]), f"fotogen-{job_id}", output_path)
++    if AUDIT_ROOT is not None:
++        guard_upload(AUDIT_ROOT, job_id, output_path)
      """POST результата на VPS. Передаём ИМЕННО локальное имя файла
      (с brand/model) — VPS сохранит под ним же."""
      headers = {"x-agent-token": VPS_API_TOKEN}
-@@ -463,6 +466,29 @@
+@@ -214,6 +231,16 @@
+ async def _deliver_entry(api_url: str, journal: Path, entry: dict) -> None:
+     job_id = entry["job_id"]
+     output_path = Path(entry["output_path"]) if entry["output_path"] else None
++    if AUDIT_ROOT is not None:
++        try:
++            guard_upload(AUDIT_ROOT, job_id, output_path)
++        except PhotoAuditHold:
++            upload_outbox.quarantine(journal)
++            async with httpx.AsyncClient(timeout=30, trust_env=False) as held:
++                await held.post(f"{api_url}/api/fail/{job_id}", headers={"x-agent-token": VPS_API_TOKEN},
++                                data={"error": "Фото удержано контролем; требуется разбор старого outbox"})
++            log.warning("Фото %d удержано контролем; outbox сохранён отдельно", job_id)
++            return
+     if output_path and not output_path.is_file():
+         raise FileNotFoundError(f"outbox job {job_id}: file missing: {output_path}")
+     if entry["kind"] == "card":
+@@ -344,11 +371,26 @@
+                                 # пауза побольше: не долбить ChatGPT (жалоба на
+                                 # «слишком много запросов» 2026-07-02)
+                                 await asyncio.sleep(60)
++                            if AUDIT_ROOT is not None:
++                                register_job(AUDIT_ROOT, job_id, job_mode, job_brand, job_model, job_specs)
+                             photo, utp = await process_research(
+                                 job_brand, job_model, job_specs,
+                                 cdp_url=CDP_URL,
+                                 project_url=(LANE.project_url_for("research")
+                                              if LANE else None) or None)
++                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
++                                async def regenerate_research_with_audit(notes):
++                                    nonlocal utp
++                                    result_photo, utp = await process_research(
++                                        job_brand, job_model, (job_specs or "") + "\n\n" + notes,
++                                        cdp_url=CDP_URL,
++                                        project_url=(LANE.project_url_for("research") if LANE else None) or None)
++                                    return result_photo
++                                if photo is None:
++                                    raise PhotoAuditHold("Research did not return a product photo")
++                                photo = await checked_output(
++                                    AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model,
++                                    photo, None, regenerate_research_with_audit)
+                             journal = upload_outbox.stage(
+                                 OUTBOX_DIR, job_id, "research",
+                                 photo if photo and photo.exists() else None, utp)
+@@ -363,6 +405,9 @@
+                                 last_error = "upload_pending"
+                                 break
+                             last_error = e
++                        except PhotoAuditHold as hold:
++                            last_error = hold
++                            break
+                         except (UploadLimitError, GenerationRateLimitError) as e:
+                             # Лимит относится к аккаунту, поэтому три быстрых
+                             # повтора только продлевают блокировку. Сохраняем
+@@ -456,6 +501,8 @@
+                                 await asyncio.sleep(15)
+ 
+                             # --- Обрабатываем через ChatGPT ---
++                            if AUDIT_ROOT is not None:
++                                register_job(AUDIT_ROOT, job_id, job_mode, job_brand, job_model, job_specs)
+                             output_path = await process_one_file(
+                                 tmp_input, mode=job_mode, specs=job_specs,
+                                 brand=job_brand, model=job_model,
+@@ -463,6 +510,16 @@
                                  project_url=(LANE.project_url_for(job_mode)
                                               if LANE else None) or None,
                              )
-+
-+                            # Контроль товара до любых outbox/Drive/VPS операций.
-+                            if os.environ.get("PHOTO_AUDIT_ENABLED") == "1":
-+                                from photo_auditor.integration import AuditHold, checked_output
-+                                audit_root = Path(os.environ["PHOTO_AUDIT_ROOT"])
-+
++                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
 +                                async def regenerate_with_audit(notes):
 +                                    return await process_one_file(
 +                                        tmp_input, mode=job_mode,
 +                                        specs=(job_specs or "") + "\n\n" + notes,
 +                                        brand=job_brand, model=job_model, cdp_url=CDP_URL,
-+                                        project_url=(LANE.project_url_for(job_mode)
-+                                                     if LANE else None) or None,
-+                                    )
-+
-+                                try:
-+                                    output_path = await checked_output(
-+                                        audit_root, f"fotogen-{job_id}", job_brand, job_model,
-+                                        output_path, tmp_input, regenerate_with_audit)
-+                                except AuditHold as hold:
-+                                    last_error = hold
-+                                    output_path = None  # нет выгрузки и повторной генерации на общем retry
-+                                    break
++                                        project_url=(LANE.project_url_for(job_mode) if LANE else None) or None)
++                                output_path = await checked_output(
++                                    AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model,
++                                    output_path, tmp_input, regenerate_with_audit)
                              log.info("Обработано → %s", output_path)
                              # Сначала фиксируем готовое на диске, затем любые
                              # сетевые операции: рестарт не теряет результат.
+@@ -470,6 +527,10 @@
+                             last_error = None
+                             break  # успех
+ 
++                        except PhotoAuditHold as hold:
++                            last_error = hold
++                            output_path = None
++                            break
+                         except UploadLimitError as e:
+                             # Ретраить бессмысленно и вредно: квота меньше всего
+                             # восстановится, если долбить её ретраями (2026-07-03).

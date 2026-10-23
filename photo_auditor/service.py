@@ -101,6 +101,11 @@ def worker_loop(store, auditor, stop):
 
 def notify(store, tg, owner):
     for row in store.pending_notifications():
+        if row['product_id'].startswith('fotogen-') and row['status'] == 'regenerate':
+            # The generator receives this feedback over the API. Do not flood the
+            # owner with intermediate revisions that are already being corrected.
+            store.notified(row['id'])
+            continue
         report = row["report"]
         folder = store.root / row["id"]
         sheet = folder / "comparison.jpg"

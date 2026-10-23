@@ -117,7 +117,7 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
                 except Exception:
                     agent = "состояние контент-агента неизвестно"
             self._json(200, {"message": message, "context": {"hint": hint, "workers": agent,
-                                                              "capabilities": ["list_products"],
+                                                              "capabilities": ["list_products", "product_selection", "full_catalog"],
                                                               "history": store.dialogue_before(message["id"]) if message else [],
                                                               "today": store.actions_since(start_of_day(now))}})
 

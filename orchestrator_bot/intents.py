@@ -37,6 +37,7 @@ class Result:
     log_id: int | None = None
     ask_id: int | None = None
     buttons: list[dict] = field(default_factory=list)
+    selection_rows: list[list[dict]] = field(default_factory=list)
 
 
 def parse_intent(raw: str) -> dict:
@@ -74,6 +75,8 @@ def _enqueue(action: dict) -> dict | None:
         clean["btu"] = sorted(btu)
     if isinstance(frost, int) and 5 <= frost <= 40:
         clean["min_temp"] = frost
+    if action.get('selection') in ('choose', 'manual', 'auto', 'all', 'first'):
+        clean['selection'] = action['selection']
     for flag in ("inverter", "heat_pump", "full_dc"):  # тип кондиционера — только явно сказанный
         if action.get(flag) is True:
             clean[flag] = True
@@ -143,7 +146,10 @@ def plan(actions: list[dict], resolve: Callable[[dict], dict], threshold: int = 
         selected = len(found.get("items") or [])          # сколько реально поставится с учётом квот
         if total == 0:
             outcomes.append(Outcome("not_found", action, f"Не нашёл в наличии: «{action['category']}»"))
-        elif action["count"] is None and selected > threshold:
+        elif action.get('selection') in ('choose', 'manual') or (
+                action.get('selection') == 'auto' and action['count'] is None):
+            outcomes.append(Outcome('choose_products', action, action['category'], matches=total))
+        elif action["count"] is None and selected > threshold and action.get('selection') != 'all':
             outcomes.append(Outcome("ask", action,
                                     f"По «{action['category']}» нашлось {selected} позиций — сколько ставить?",
                                     options=[f"Первые {threshold}", f"Все {selected}", "Отмена"], matches=selected))
@@ -166,4 +172,5 @@ def render(reply: str, results: list[Result]) -> tuple[str, list[list[dict]]]:
                          for n, option in enumerate(result.outcome.options)]
         if result.buttons:
             keyboard.append(list(result.buttons))
+        keyboard.extend(result.selection_rows)
     return "\n".join(lines), keyboard

@@ -241,7 +241,7 @@ def test_status_has_no_start_button_when_agent_ready(deps):
 def test_menu_installs_persistent_reply_keyboard(deps):
     bot.handle_update(_msg("/start"), deps)
     reply_keyboard = deps.tg.calls[-1][4]
-    assert [b for row in reply_keyboard for b in row] == ["📋 Статус", "🧾 Сводка", "🛠 Мастер задач"]
+    assert [b for row in reply_keyboard for b in row] == ["📋 Статус", "🧾 Сводка", '📚 Каталоги и товары', "🛠 Мастер задач"]
 
 
 def test_reply_keyboard_buttons_work_without_queue(deps):

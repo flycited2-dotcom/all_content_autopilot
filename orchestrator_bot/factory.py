@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
 
 
@@ -24,9 +25,14 @@ class Factory:
         self._hint: tuple[float, dict] | None = None
 
     def _run(self, *args) -> dict:
-        cmd = [self.cf_python, "-m", "content_factory.agent_cli", *args]
+        catalog = args[0] in ('hint', 'resolve', 'enqueue')
+        module = 'orchestrator_bot.catalog_cli' if catalog else 'content_factory.agent_cli'
+        cmd = [self.cf_python, "-m", module, *args]
         # content-factory не установлен пакетом: его юниты задают PYTHONPATH=<root>/src — делаем так же
-        env = {**os.environ, "PYTHONPATH": f"{self.cf_root}/src"}
+        python_path = [f'{self.cf_root}/src']
+        if catalog:
+            python_path.append(str(Path(__file__).resolve().parents[1]))
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(python_path)}
         proc = self.runner(cmd, cwd=self.cf_root, capture_output=True, text=True,
                            encoding="utf-8", timeout=self.timeout, env=env)
         if proc.returncode != 0:
@@ -45,6 +51,10 @@ class Factory:
             args += ["--quotas", json.dumps(action["quotas"], ensure_ascii=False)]
         if action.get("source"):
             args += ["--source", action["source"]]
+        if action.get('selection'):
+            args += ['--selection', action['selection']]
+        if action.get('keys') is not None:
+            args += ['--keys-json', json.dumps(action['keys'], ensure_ascii=False)]
         if action.get("btu"):
             args += ["--btu", "-".join(str(b) for b in action["btu"])]
         if action.get("min_temp"):

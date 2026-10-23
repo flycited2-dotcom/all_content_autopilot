@@ -40,6 +40,7 @@ class Page(HTMLParser):
         self.text, self.images, self.skip = [], set(), 0
         self.primary_images, self.structured, self._ld = set(), [], None
         self.headings, self._heading = [], 0
+        self.named_images = []
 
     def handle_starttag(self, tag, attrs):
         attr = dict(attrs)
@@ -53,9 +54,11 @@ class Page(HTMLParser):
             self.images.add(attr.get("content", ""))
             self.primary_images.add(attr.get("content", ""))
         if tag == "img":
+            names = ' '.join(attr.get(k, '') for k in ('alt', 'title', 'aria-label'))
             for key in ("src", "data-src", "data-original"):
-                if attr.get(key):
+                if attr.get(key) and not attr[key].startswith('data:'):
                     self.images.add(attr[key])
+                    self.named_images.append((names, attr[key]))
             for key in ("srcset", "data-srcset"):
                 self.images.update(p.strip().split(" ")[0] for p in attr.get(key, "").split(",") if p.strip())
         if tag == "a" and re.search(r"\.(?:png|jpg|jpeg|webp)(?:\?|$)", attr.get("href", ""), re.I):
@@ -84,7 +87,10 @@ class Page(HTMLParser):
 
     def product_images(self, model):
         # A SKU in a related-products footer does not identify the page's main photo.
-        found = set(self.primary_images) if contains_model(" ".join(self.headings), model) else set()
+        heading_matches = contains_model(' '.join(self.headings), model)
+        found = set(self.primary_images) if heading_matches else set()
+        if heading_matches:
+            found.update(url for names, url in self.named_images if contains_model(names, model))
         def walk(value, depth=0):
             if depth > 15:
                 return
@@ -108,7 +114,11 @@ class Page(HTMLParser):
                     walk(item, depth + 1)
         for value in self.structured:
             walk(value)
-        return found
+        def product_asset(url):
+            path = urlsplit(url).path.lower()
+            return not (url.lower().endswith(('null', 'undefined')) or path.endswith('.svg') or re.search(
+                r'(?:^|[/_.-])(?:logo|icon|placeholder|loading|support|faq)(?:[/_.-]|$)', path))
+        return {url for url in found if product_asset(url)}
 
 
 class PublicWeb:
@@ -123,17 +133,22 @@ class PublicWeb:
             addresses = self.resolver(host, 443, type=socket.SOCK_STREAM)
             if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
                 raise ValueError("Непубличный адрес источника")
-            with self.client.stream("GET", url, headers={"User-Agent": "FotoAuditor/1.0"}) as response:
-                if response.is_redirect:
-                    url = canonical(urljoin(url, response.headers["location"]))
-                    continue
-                response.raise_for_status()
-                content = bytearray()
-                for chunk in response.iter_bytes():
-                    content.extend(chunk)
-                    if len(content) > maximum:
-                        raise ValueError("Источник слишком большой")
-                return url, bytes(content)
+            for attempt in range(2):
+                try:
+                    with self.client.stream("GET", url, headers={"User-Agent": "FotoAuditor/1.0"}) as response:
+                        if response.is_redirect:
+                            url = canonical(urljoin(url, response.headers['location']))
+                            break
+                        response.raise_for_status()
+                        content = bytearray()
+                        for chunk in response.iter_bytes():
+                            content.extend(chunk)
+                            if len(content) > maximum:
+                                raise ValueError("Источник слишком большой")
+                        return url, bytes(content)
+                except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout):
+                    if attempt:
+                        raise
         raise ValueError("Слишком много перенаправлений")
 
     def reference(self, candidate, model, cited, domains):
@@ -152,7 +167,6 @@ class PublicWeb:
         text = unescape(" ".join(page.text))
         if not contains_model(text, model):
             raise ValueError("На странице нет точной номенклатуры")
-        image_url = canonical(urljoin(final, candidate["image_url"]))
         linked = set()
         for value in page.images:
             try:
@@ -165,6 +179,14 @@ class PublicWeb:
                 primary.add(canonical(urljoin(final, value)))
             except ValueError:
                 pass
+        if candidate.get('image_url'):
+            image_url = canonical(urljoin(final, candidate['image_url']))
+        elif primary:
+            # The page, not a guessed model URL, supplies the actual product image.
+            image_url = sorted(primary, key=lambda value: (
+                model_key(model) not in model_key(urlsplit(value).path), len(value), value))[0]
+        else:
+            raise ValueError('На странице не подтверждена связь фотографии с точной моделью')
         if image_url not in linked | primary:
             raise ValueError("Эталонное фото не связано со страницей товара")
         _, photo = self.fetch(image_url, 10 * 1024 * 1024)

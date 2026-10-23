@@ -50,6 +50,9 @@ def validated_intent(value) -> dict:
         allowed = {"type"}
         if kind in ("enqueue_products", "list_products"):
             allowed.update(("category", "count", "quotas", "source", "btu", "min_temp", "inverter", "heat_pump", "full_dc"))
+            allowed.add('selection')
+            if 'selection' in action and action['selection'] not in ('choose', 'manual', 'auto', 'all', 'first'):
+                raise ValueError('Неверный режим выбора')
             if kind == "enqueue_products":
                 allowed.update(("at", "day"))
             if not _text(action.get("category"), 160):

@@ -59,7 +59,7 @@ def test_factory_builds_cli_args_and_parses_json():
               "quotas": {"ресанта": None}, "source": None, "at": "12:00", "day": None}
     assert f.enqueue(action) == {"accepted": ["k1"]}
     args, kwargs = record[0]
-    assert args[:4] == ["/venv/python", "-m", "content_factory.agent_cli", "enqueue"]
+    assert args[:4] == ["/venv/python", "-m", "orchestrator_bot.catalog_cli", "enqueue"]
     assert args[args.index("--category") + 1] == "стабилизаторы"
     assert "--due" not in args          # время — выход партии, генерация сразу
     assert json.loads(args[args.index("--quotas") + 1]) == {"ресанта": None}

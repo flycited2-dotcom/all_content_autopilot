@@ -13,6 +13,10 @@ def _names(items, limit=10) -> str:
 
 def execute(outcome: Outcome, factory, store, msg_id) -> Result:
     kind = outcome.kind
+    if kind == 'choose_products':
+        from orchestrator_bot.selection_ui import open_selection
+        text, buttons = open_selection(store, factory, msg_id, outcome.action)
+        return Result(outcome, text, selection_rows=buttons)
     if kind == "list_products":
         found = factory.resolve(outcome.action)
         items = found.get("items") or []
