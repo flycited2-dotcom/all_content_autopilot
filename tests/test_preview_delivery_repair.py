@@ -12,8 +12,15 @@ from cf_preview_repair import patched_publisher, patched_excel, review_env
 CF_ROOT = Path(__file__).resolve().parents[2] / "content-factory"
 
 
+def cf_source(relative):
+    path = CF_ROOT / "src/content_factory" / relative
+    if not path.is_file():
+        pytest.skip("Интеграционный тест патча требует соседнюю рабочую копию content-factory")
+    return path.read_text(encoding="utf-8")
+
+
 def load_publisher(tmp_path, monkeypatch):
-    original = (CF_ROOT / "src/content_factory/publish/telegram.py").read_text(encoding="utf-8")
+    original = cf_source("publish/telegram.py")
     target = tmp_path / "publisher.py"
     target.write_text(patched_publisher(original), encoding="utf-8")
     # Standalone smoke test of the actual patched source, without importing or
@@ -82,7 +89,7 @@ def test_same_failure_for_100_products_alerts_once_and_survives_restart(tmp_path
     import ast
     import sqlite3
     import time
-    source = patched_excel((CF_ROOT / "src/content_factory/orchestrator/excel_run.py").read_text(encoding="utf-8"))
+    source = patched_excel(cf_source("orchestrator/excel_run.py"))
     module = ast.parse(source)
     function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "preview_delivery_alert")
     namespace = {"sqlite3": sqlite3, "time": time, "re": __import__("re")}
