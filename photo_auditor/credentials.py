@@ -4,6 +4,7 @@ import json
 import re
 import secrets
 import sys
+import unicodedata
 from pathlib import Path
 
 import httpx
@@ -33,29 +34,30 @@ def load(root):
 
 def configure(root, console=False):
     if sys.platform == "win32" and not console:
-        import tkinter as tk
-        from tkinter import messagebox
-        from tkinter.simpledialog import askstring
-        window = tk.Tk()
-        window.withdraw()
-        try:
-            while True:
-                token = askstring("Фотоаудитор", f"Токен @{BOT_USERNAME} из BotFather (скрытый ввод):", show="*", parent=window)
-                if token is None:
-                    return {"connected": False, "cancelled": True}
-                try:
-                    return save_token(root, token)
-                except SetupError as error:
-                    messagebox.showerror("Фотоаудитор: подключение", str(error), parent=window)
-        finally:
-            window.destroy()
+        from photo_auditor.setup_ui import run_setup
+        return run_setup(root)
     return save_token(root, getpass.getpass(f"Токен @{BOT_USERNAME} (скрытый ввод): "))
 
 
-def save_token(root, token):
-    token = (token or "").strip()
-    if not re.fullmatch(r"\d{6,16}:[A-Za-z0-9_-]{25,80}", token):
-        raise SetupError("Неверный формат. Вставьте только сам токен из BotFather: цифры, двоеточие и ключ, без поясняющего текста.")
+def normalize_token(text):
+    """Extract one credential from a BotFather copy, without echoing any input."""
+    if not isinstance(text, str) or not text.strip():
+        raise SetupError("Поле пустое. Скопируйте токен в BotFather и нажмите «Вставить из буфера».")
+    if len(text) > 32000:
+        raise SetupError("Скопировано слишком много текста. Скопируйте сообщение BotFather с токеном.")
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(char for char in text if unicodedata.category(char) != "Cf")
+    matches = re.findall(r"(?<![A-Za-z0-9_-])([0-9]{5,20})\s*:\s*([A-Za-z0-9_-]{15,256})(?![A-Za-z0-9_-])", text)
+    tokens = {bot_id + ":" + key for bot_id, key in matches}
+    if len(tokens) > 1:
+        raise SetupError("Скопированы токены нескольких ботов. Скопируйте только сообщение для @foto_auditor_bot.")
+    if not tokens:
+        raise SetupError("Токен в тексте не найден. В BotFather нажмите кнопку копирования токена, затем «Вставить из буфера» здесь.")
+    return tokens.pop()
+
+
+def verify_token(token):
+    """getMe is the authority for token validity and bot identity."""
     try:
         with httpx.Client(timeout=20, follow_redirects=False) as client:
             response = client.post(f"https://api.telegram.org/bot{token}/getMe")
@@ -67,6 +69,9 @@ def save_token(root, token):
             raise SetupError("Это токен другого бота. Нужен токен именно @foto_auditor_bot.")
     except (httpx.HTTPError, json.JSONDecodeError):
         raise SetupError("Не удалось связаться с Telegram. Проверьте интернет и повторите ввод; токен не сохранён.") from None
+
+
+def store_verified_token(root, token):
     path = credentials_path(root)
     api_token = load(root)["api_token"] if path.exists() else secrets.token_urlsafe(32)
     blob = json.dumps({"bot_token": token, "api_token": api_token}).encode()
@@ -74,3 +79,9 @@ def save_token(root, token):
         blob = b"dpapi:v1\n" + _dpapi(blob)
     _atomic_write(path, blob)
     return {"connected": True, "username": BOT_USERNAME}
+
+
+def save_token(root, text):
+    token = normalize_token(text)
+    verify_token(token)
+    return store_verified_token(root, token)
