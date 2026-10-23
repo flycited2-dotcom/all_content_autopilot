@@ -13,6 +13,10 @@ from listener.chatgpt_auth import _atomic_write, _dpapi
 BOT_USERNAME = "foto_auditor_bot"
 
 
+class SetupError(ValueError):
+    """Only application-authored messages; never include a token or HTTP URL."""
+
+
 def credentials_path(root):
     return Path(root) / "runs/private/photo-auditor.dat"
 
@@ -30,24 +34,39 @@ def load(root):
 def configure(root, console=False):
     if sys.platform == "win32" and not console:
         import tkinter as tk
+        from tkinter import messagebox
         from tkinter.simpledialog import askstring
         window = tk.Tk()
         window.withdraw()
-        token = askstring("Фотоаудитор", f"Токен @{BOT_USERNAME} из BotFather (скрытый ввод):", show="*", parent=window)
-        window.destroy()
-    else:
-        token = getpass.getpass(f"Токен @{BOT_USERNAME} (скрытый ввод): ")
+        try:
+            while True:
+                token = askstring("Фотоаудитор", f"Токен @{BOT_USERNAME} из BotFather (скрытый ввод):", show="*", parent=window)
+                if token is None:
+                    return {"connected": False, "cancelled": True}
+                try:
+                    return save_token(root, token)
+                except SetupError as error:
+                    messagebox.showerror("Фотоаудитор: подключение", str(error), parent=window)
+        finally:
+            window.destroy()
+    return save_token(root, getpass.getpass(f"Токен @{BOT_USERNAME} (скрытый ввод): "))
+
+
+def save_token(root, token):
     token = (token or "").strip()
     if not re.fullmatch(r"\d{6,16}:[A-Za-z0-9_-]{25,80}", token):
-        raise ValueError("Ввод отменён или формат токена неверен")
+        raise SetupError("Неверный формат. Вставьте только сам токен из BotFather: цифры, двоеточие и ключ, без поясняющего текста.")
     try:
         with httpx.Client(timeout=20, follow_redirects=False) as client:
             response = client.post(f"https://api.telegram.org/bot{token}/getMe")
             data = response.json()
-        if not data.get("ok") or data.get("result", {}).get("username", "").casefold() != BOT_USERNAME:
-            raise ValueError("Токен не принадлежит @foto_auditor_bot")
+        if not isinstance(data, dict) or not data.get("ok"):
+            raise SetupError("Telegram не принял токен. Скопируйте актуальный токен @foto_auditor_bot из BotFather.")
+        result = data.get("result") or {}
+        if not isinstance(result, dict) or result.get("username", "").casefold() != BOT_USERNAME:
+            raise SetupError("Это токен другого бота. Нужен токен именно @foto_auditor_bot.")
     except (httpx.HTTPError, json.JSONDecodeError):
-        raise ValueError("Не удалось проверить подключение к Telegram") from None
+        raise SetupError("Не удалось связаться с Telegram. Проверьте интернет и повторите ввод; токен не сохранён.") from None
     path = credentials_path(root)
     api_token = load(root)["api_token"] if path.exists() else secrets.token_urlsafe(32)
     blob = json.dumps({"bot_token": token, "api_token": api_token}).encode()
