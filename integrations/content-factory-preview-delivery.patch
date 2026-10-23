@@ -1,0 +1,79 @@
+--- a/src/content_factory/publish/telegram.py
++++ b/src/content_factory/publish/telegram.py
+@@ -234,6 +234,20 @@
+     return http.post(url, data=data, files=files)
+ 
+ 
++def _migration_target(response):
++    """400 + Telegram parameters is a definite non-delivery, safe to redirect once."""
++    if response.status_code != 400:
++        return None
++    try:
++        body = response.json()
++        target = (body.get("parameters") or {}).get("migrate_to_chat_id")
++        if body.get("ok") is False and type(target) is int and -(2**52) < target < 0:
++            return target
++    except (ValueError, AttributeError, TypeError):
++        pass
++    return None
++
++
+ def publish_post(bot_token: str, channel_id: str, image: str, caption: str,
+                  http: httpx.Client | None = None, *, parse_mode: str | None = None,
+                  key: str | None = None, state: PublishState | None = None,
+@@ -251,10 +265,17 @@
+     client = http or telegram_client(60)
+ 
+     last_err = None
++    migration_followed = False
+     for attempt in range(max(1, retries) + 1):
+         try:
+             r = _send_once(bot_token, channel_id, image, caption, parse_mode, client,
+                            reply_markup=reply_markup)
++            migrated = _migration_target(r)
++            if not migration_followed and migrated is not None and str(migrated) != str(channel_id):
++                migration_followed = True
++                channel_id = migrated
++                r = _send_once(bot_token, channel_id, image, caption, parse_mode, client,
++                               reply_markup=reply_markup)
+         except httpx.HTTPError as e:                       # сетевой сбой → ретрай
+             last_err = f"network: {e}"
+             if attempt < retries:
+--- a/src/content_factory/orchestrator/excel_run.py
++++ b/src/content_factory/orchestrator/excel_run.py
+@@ -35,6 +35,26 @@
+ from content_factory.drive_archive import ARTICLE, restore_missing, valid_png
+ 
+ DIVIDER = "═" * 26
++
++
++def preview_delivery_alert(db_path, target, error, send, now=None):
++    """Один общий алерт о сбое доставки вместо сообщения на каждый товар."""
++    from contextlib import closing
++    now = time.time() if now is None else now
++    error = re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot<redacted>", str(error or "unknown"))[:200]
++    with closing(sqlite3.connect(db_path, timeout=30)) as db, db:
++        db.execute("CREATE TABLE IF NOT EXISTS preview_delivery_alerts "
++                   "(target TEXT PRIMARY KEY, error TEXT, notified REAL, suppressed INTEGER DEFAULT 0)")
++        db.execute("BEGIN IMMEDIATE")
++        row = db.execute("SELECT notified FROM preview_delivery_alerts WHERE target=?", (str(target),)).fetchone()
++        if row and now - row[0] < 900:
++            db.execute("UPDATE preview_delivery_alerts SET suppressed=suppressed+1 WHERE target=?", (str(target),))
++            return False
++        db.execute("INSERT OR REPLACE INTO preview_delivery_alerts VALUES(?,?,?,0)", (str(target), error, now))
++    send("⚠️ Не удалось доставить превью в группу проверки. "
++         "Готовые карточки сохранены, публикация не выполнена. "
++         "Повторные одинаковые ошибки объединены на 15 минут. Причина: " + error)
++    return True
+ 
+ 
+ def make_photo_resolver(store: ExcelStore, output_dir: Path, content_dir: Path):
+@@ -480,7 +500,7 @@
+         res = publish_post(token, review, card, f"{caption}\n\n— на подтверждение —",
+                            http=http, parse_mode=cfg.telegram.parse_mode, reply_markup=kb)
+         if not res.ok:                    # не молчим: владелец должен видеть сбой
+-            _alert(f"⚠️ Превью «{item.name[:60]}» не отправилось: {res.error}")
++            preview_delivery_alert(store.path, review, res.error, _alert)
+         return bool(res.ok)
+ 
+     # Дозревшие отложенные позиции снимаем ДО тика (после — уже research);
