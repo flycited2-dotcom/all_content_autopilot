@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
     # Token is entered into a masked local dialog, never a command-line argument.
