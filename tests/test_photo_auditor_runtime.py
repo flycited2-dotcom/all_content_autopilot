@@ -48,6 +48,21 @@ def test_job_scope_cannot_be_changed_to_bypass_audit(config):
         runtime.guard_upload(config, 15, Path('image.png'))
 
 
+def test_human_calibration_never_changes_automatic_verdict_or_upload_permission(tmp_path):
+    from photo_auditor.store import AuditStore
+    from tests.test_photo_auditor import picture, product
+    store = AuditStore(tmp_path)
+    job = store.submit(product(), picture())
+    claimed = store.claim(audit_id=job['id'])
+    store.finish(claimed, {'verdict': 'review', 'reason': 'Нет официального эталона',
+                          'checks': [], 'sources': [], 'dimensions_note': 'Не измерены'})
+    assert store.feedback(job['id'], 'match')
+    assert store.get(job['id'])['status'] == 'review'
+    assert not store.feedback('missing-id', 'match')
+    with pytest.raises(ValueError):
+        store.feedback(job['id'], 'approved')
+
+
 def test_generator_patch_gates_research_card_and_both_replay_routes():
     root = Path(__file__).resolve().parents[1]
     agent = root.parent / 'agent_convert_foto_rituailb2b2_V2_office/agent_convert_foto_rituailb2b2/remote_agent.py'

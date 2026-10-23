@@ -19,11 +19,15 @@ def select_rows(rows, *, count=None, quotas=None, mode='auto', keys=None):
     if count is not None and (type(count) is not int or count < 1):
         raise ValueError('Количество должно быть положительным целым числом')
     quotas = {brand_key(k): v for k, v in (quotas or {}).items()}
-    rows = list({r['key']: r for r in reversed(rows)}.values())[::-1]
+    unique = {}
+    for row in rows:
+        unique.setdefault(row['key'], row)
+    rows = list(unique.values())
     if quotas and '*' not in quotas:
         rows = [r for r in rows if brand_key(r.get('brand')) in quotas]
     if keys is not None:
-        if not isinstance(keys, list) or not keys or len(keys) != len(set(keys)):
+        if (not isinstance(keys, list) or not keys or any(not isinstance(key, str) for key in keys)
+                or len(keys) != len(set(keys))):
             raise ValueError('Некорректный список выбранных моделей')
         by_key = {r['key']: r for r in rows}
         missing = [key for key in keys if key not in by_key]

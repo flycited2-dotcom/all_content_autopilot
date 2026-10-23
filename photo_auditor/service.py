@@ -114,12 +114,32 @@ def notify(store, tg, owner):
         text = (f"{LABELS[row['status']]}\n{row['product']['brand']} {row['product']['model']}\n"
                 f"Ревизия: {row['revision']}. Проверка: {row['id'][:12]}\n\n{feedback(report)}\n\n"
                 f"Размеры: {report['dimensions_note']}\n\nРешение относится к фотографии; публикацию подтверждает владелец.")
-        for part in text_chunks(text):
-            tg.send(owner, part)
+        parts = list(text_chunks(text))
+        keyboard = [[{'text': title, 'callback_data': f"qa:{code}:{row['id']}"}]
+                    for title, code in [('Соответствует товару', 'match'),
+                                        ('Есть расхождение', 'mismatch'), ('Не могу определить', 'unclear')]]
+        parts[-1] += '\n\nОцените результат для калибровки аудитора. Оценка не запускает публикацию.'
+        # Keep the extra footer within Telegram's limit even for long source lists.
+        chunks = list(text_chunks('\n'.join(parts)))
+        for n, part in enumerate(chunks):
+            tg.send(owner, part, keyboard if n == len(chunks) - 1 else None)
         store.notified(row["id"])
 
 
 def handle_update(update, store, tg, owner):
+    callback = update.get('callback_query')
+    if callback:
+        if callback.get('from', {}).get('id') != owner or callback.get('message', {}).get('chat', {}).get('id') != owner:
+            return
+        data = callback.get('data', '').split(':')
+        import re
+        if len(data) == 3 and data[0] == 'qa' and re.fullmatch('[a-f0-9]{32}', data[2]):
+            try:
+                saved = store.feedback(data[2], data[1])
+            except ValueError:
+                saved = False
+            tg.answer_callback(callback['id'], 'Оценка сохранена' if saved else 'Проверка не найдена')
+        return
     message = update.get("message") or {}
     if message.get("from", {}).get("id") != owner or message.get("chat", {}).get("id") != owner:
         return

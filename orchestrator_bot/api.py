@@ -102,6 +102,11 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
         def do_GET(self):
             if not self._authorized():
                 return
+            if self.path == '/health':
+                heartbeat = store.last_heartbeat()
+                return self._json(200, {'ok': True, 'queued': store.count_new(),
+                    'heartbeat_age': max(0, clock() - heartbeat) if heartbeat else None,
+                    'capabilities': ['list_products', 'product_selection', 'full_catalog']})
             if self.path != "/next":
                 return self._json(404, {"error": "not found"})
             now = clock()

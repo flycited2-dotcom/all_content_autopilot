@@ -99,6 +99,14 @@ def test_api_rejects_missing_token(server):
     assert exc.value.code == 401
 
 
+def test_health_check_never_claims_or_executes_a_waiting_message(server):
+    store, factory, sent, base = server
+    store.add_message(998, 'text', 'поставь холодильники')
+    health = _call(base, 'GET', '/health')
+    assert health['queued'] == 1 and 'product_selection' in health['capabilities']
+    assert store.count_new() == 1 and not factory.enqueued and not sent
+
+
 def test_intent_enqueue_sends_reply_with_cancel_button(server):
     store, factory, sent, base = server
     msg = store.add_message(10, "voice", "поставь 2 холодильника беко")

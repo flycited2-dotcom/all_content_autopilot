@@ -25,6 +25,8 @@ class AuditStore:
                 retry_at REAL DEFAULT 0, notified INTEGER DEFAULT 0,
                 UNIQUE(product_id, revision))""")
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT)")
+            db.execute('CREATE TABLE IF NOT EXISTS human_feedback ('
+                       'audit_id TEXT PRIMARY KEY, verdict TEXT NOT NULL, created REAL NOT NULL)')
 
     @contextmanager
     def connect(self):
@@ -145,6 +147,18 @@ class AuditStore:
     def notified(self, audit_id):
         with self.connect() as db:
             db.execute("UPDATE audits SET notified=1 WHERE id=?", (audit_id,))
+
+    def feedback(self, audit_id, verdict):
+        if verdict not in ('match', 'mismatch', 'unclear'):
+            raise ValueError('Неверная оценка')
+        with self.connect() as db:
+            row = db.execute('SELECT report FROM audits WHERE id=?', (audit_id,)).fetchone()
+            if not row or row['report'] is None:
+                return False
+            db.execute('INSERT INTO human_feedback VALUES(?,?,?) ON CONFLICT(audit_id) '
+                       'DO UPDATE SET verdict=excluded.verdict,created=excluded.created',
+                       (audit_id, verdict, time.time()))
+        return True
 
     def offset(self, value=None):
         with self.connect() as db:

@@ -39,6 +39,13 @@ def test_brand_filter_never_fills_shortage_with_other_brands():
     assert len(selected) == 2 and all(r['brand'] == 'LG' for r in selected)
 
 
+def test_same_model_in_two_sources_keeps_first_source_and_catalog_order():
+    original = rows(3)
+    duplicate = {**original[0], 'source': 'later-supplier'}
+    selected = select_rows(original + [duplicate], mode='first')
+    assert selected == original
+
+
 def test_manual_keys_preserve_order_and_reject_stock_change():
     assert [r['key'] for r in select_rows(rows(), keys=['k7', 'k1'])] == ['k7', 'k1']
     with pytest.raises(ValueError, match='недоступна'):

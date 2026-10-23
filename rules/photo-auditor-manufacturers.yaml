@@ -9,3 +9,5 @@ beko: [beko.com]
 lg: [lg.com]
 haier: [haier.com, haier-europe.com]
 samsung: [samsung.com]
+# Verified official Xiaomi TV catalog: https://www.mi.com/ru/product-list/tv-media/
+xiaomi: [mi.com]
