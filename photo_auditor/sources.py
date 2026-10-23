@@ -55,12 +55,16 @@ class Page(HTMLParser):
             self.primary_images.add(attr.get("content", ""))
         if tag == "img":
             names = ' '.join(attr.get(k, '') for k in ('alt', 'title', 'aria-label'))
-            for key in ("src", "data-src", "data-original"):
+            for key in ("src", "data-src", "data-original", "data-large", "data-zoom-image"):
                 if attr.get(key) and not attr[key].startswith('data:'):
                     self.images.add(attr[key])
                     self.named_images.append((names, attr[key]))
             for key in ("srcset", "data-srcset"):
-                self.images.update(p.strip().split(" ")[0] for p in attr.get(key, "").split(",") if p.strip())
+                for part in attr.get(key, "").split(","):
+                    if part.strip():
+                        url = part.strip().split()[0]
+                        self.images.add(url)
+                        self.named_images.append((names, url))
         if tag == "a" and re.search(r"\.(?:png|jpg|jpeg|webp)(?:\?|$)", attr.get("href", ""), re.I):
             self.images.add(attr["href"])
 
@@ -183,8 +187,12 @@ class PublicWeb:
             image_url = canonical(urljoin(final, candidate['image_url']))
         elif primary:
             # The page, not a guessed model URL, supplies the actual product image.
-            image_url = sorted(primary, key=lambda value: (
-                model_key(model) not in model_key(urlsplit(value).path), len(value), value))[0]
+            def quality(value):
+                path = urlsplit(value).path.casefold()
+                thumbnail = bool(re.search(r'(?:small|thumb|thumbnail|/\d{1,2}_\d{1,2}_|/fit/\d{1,2}/\d{1,2}/)', path))
+                large = bool(re.search(r'(?:original|large|zoom|fullsize)', path))
+                return (thumbnail, not large, model_key(model) not in model_key(path), len(value), value)
+            image_url = min(primary, key=quality)
         else:
             raise ValueError('На странице не подтверждена связь фотографии с точной моделью')
         if image_url not in linked | primary:

@@ -22,6 +22,26 @@ def test_model_in_recommendation_alt_does_not_override_wrong_page_heading():
     assert page.product_images('ABC-12-RU') == set()
 
 
+def test_model_bound_large_photo_is_preferred_over_short_social_thumbnail():
+    from tests.test_photo_auditor import picture
+    requests = []
+    def handle(request):
+        requests.append(str(request.url))
+        if request.url.path == '/model':
+            return httpx.Response(200, text='<title>ABC-12-RU</title>'
+                '<meta property="og:image" content="/Small-1.jpg">'
+                '<img alt="ABC-12-RU" src="/Small-1.jpg" '
+                'srcset="/medium02.jpg 600w, /original-model-detail.jpg 1600w">')
+        return httpx.Response(200, content=picture())
+    resolver = lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443))]
+    web = PublicWeb(httpx.Client(transport=httpx.MockTransport(handle)), resolver)
+    source, _, _ = web.reference({'url': 'https://manufacturer.example/model'}, 'ABC-12-RU',
+                                 ['https://manufacturer.example/model'], ['manufacturer.example'])
+    assert source['image_url'] == 'https://manufacturer.example/original-model-detail.jpg'
+    assert requests[-1] == source['image_url']
+    assert source['model_image_verified']
+
+
 def test_transient_protocol_error_is_retried_with_public_address_check():
     requests, resolutions = [], []
     def handle(request):
