@@ -35,8 +35,29 @@ def test_network_error_never_exposes_credential_bearing_url(monkeypatch, tmp_pat
 
 def test_invalid_format_is_reported_before_network(monkeypatch, tmp_path):
     monkeypatch.setattr(credentials.httpx, "Client", lambda **kwargs: pytest.fail("No request for invalid input"))
-    with pytest.raises(credentials.SetupError, match="Неверный формат"):
-        credentials.save_token(tmp_path, "Use this token: " + TOKEN)
+    with pytest.raises(credentials.SetupError, match="не найден"):
+        credentials.save_token(tmp_path, "Use this token: not-a-token")
+
+
+@pytest.mark.parametrize("text", [TOKEN, "Use this token to access the HTTP API:\n" + TOKEN + "\nKeep it secure.",
+    "```\n" + TOKEN + "\n```", TOKEN[:14] + "\u200b" + TOKEN[14:], "\u2066" + TOKEN + "\u2069",
+    TOKEN.replace(":", "："), "Токен: " + TOKEN, TOKEN + "\n" + TOKEN])
+def test_botfather_copy_extracts_exactly_one_token(text):
+    assert credentials.normalize_token(text) == TOKEN
+
+
+def test_two_different_tokens_are_not_silently_chosen():
+    with pytest.raises(credentials.SetupError, match="нескольких"):
+        credentials.normalize_token(TOKEN + "\n123456780:" + "b" * 35)
+
+
+def test_control_v_works_with_russian_keyboard_layout():
+    from types import SimpleNamespace
+    from photo_auditor.setup_ui import control_shortcut
+    pasted = []
+    entry = SimpleNamespace(event_generate=pasted.append)
+    assert control_shortcut(SimpleNamespace(keycode=86, keysym="Cyrillic_em"), entry) == "break"
+    assert pasted == ["<<Paste>>"]
 
 
 def test_success_validates_username_and_protects_storage(monkeypatch, tmp_path):
