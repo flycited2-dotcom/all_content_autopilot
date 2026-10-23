@@ -7,10 +7,10 @@
 ## Подключение токена
 
 Токен не отправлять в чат, GitHub, файл настроек или командную строку.
-Из папки проекта запустить:
+Команду можно запускать из любой папки PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\set-photo-auditor-token.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\TLT-1\Documents\GitHub\Agents_MY\scripts\set-photo-auditor-token.ps1"
 ```
 
 Откроется локальное окно со скрытым вводом. Приложение проверит через Telegram
@@ -81,7 +81,7 @@ python -m photo_auditor run
 Автозапуск после подключения:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-photo-auditor-task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\TLT-1\Documents\GitHub\Agents_MY\scripts\install-photo-auditor-task.ps1"
 Start-ScheduledTask -TaskName 'AgentsMY Photo Auditor'
 ```
 

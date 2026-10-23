@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = (Get-Command python).Source
 if (!(Test-Path -LiteralPath (Join-Path $projectRoot "runs/private/photo-auditor.dat"))) {
