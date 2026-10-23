@@ -226,12 +226,27 @@ class ChatGPTProvider:
             inputs.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))})
         except (TypeError, ValueError):
             raise _failure(default="configuration") from None
+        return self._respond(instructions, inputs)["text"]
+
+    def inspect(self, instructions: str, content: list, *, search=False, domains=()) -> dict:
+        """Vision/research for the photo auditor; never enables generation tools."""
+        if not isinstance(instructions, str) or not isinstance(content, list) or not content:
+            raise _failure(default="configuration")
+        return self._respond(instructions, [{"role": "user", "content": content}], search=search, domains=domains)
+
+    def _respond(self, instructions, inputs, *, search=False, domains=()):
         try:
             token = self.auth.access_token()
             body = {"model": self._model(token), "instructions": instructions, "input": inputs,
                     "store": False, "stream": True}
+            if search:
+                tool = {"type": "web_search"}
+                if domains:
+                    tool["filters"] = {"allowed_domains": list(domains)}
+                body.update(tools=[tool], include=["web_search_call.action.sources"])
             headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
             finalized = {}
+            output_items = []
             with self.http.stream("POST", BASE_URL + "/responses", json=body, headers=headers,
                                   timeout=TIMEOUT, follow_redirects=False) as response:
                 if not 200 <= response.status_code < 300:
@@ -250,6 +265,8 @@ class ChatGPTProvider:
                         raise _failure()
                     if kind in ("response.failed", "response.incomplete", "error"):
                         raise _failure(body=event, retry_after=response.headers.get("Retry-After"), now=self.clock())
+                    if kind == "response.output_item.done" and isinstance(event.get("item"), dict):
+                        output_items.append(event["item"])
                     if kind == "response.output_text.done":
                         # ChatGPT plan streams can finalize text here, then send completed.output=[].
                         # Keep finalized parts, but never return them until response.completed arrives.
@@ -271,6 +288,7 @@ class ChatGPTProvider:
                         output = result.get("output")
                         if not isinstance(output, list):
                             raise _failure()
+                        output = output or output_items
                         parts = []
                         for message in output:
                             if not isinstance(message, dict):
@@ -282,11 +300,24 @@ class ChatGPTProvider:
                                 if isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
                                     parts.append(part["text"])
                         text = "".join(parts)
-                        if not output and finalized:
+                        if not text and finalized:
                             text = "".join(finalized[key][1] for key in sorted(finalized))
                         if not text.strip():
                             raise _failure()
-                        return text
+                        sources = set()
+                        for item in output:
+                            if item.get("type") == "web_search_call":
+                                action = item.get("action") or {}
+                                if isinstance(action.get("url"), str):
+                                    sources.add(action["url"])
+                                for source in action.get("sources") or []:
+                                    if isinstance(source, dict) and isinstance(source.get("url"), str):
+                                        sources.add(source["url"])
+                            for part in item.get("content") or []:
+                                for annotation in part.get("annotations") or []:
+                                    if annotation.get("type") == "url_citation" and isinstance(annotation.get("url"), str):
+                                        sources.add(annotation["url"])
+                        return {"text": text, "sources": sorted(sources)}
             raise _failure(default="network")
         except httpx.RequestError:
             raise _failure(default="network") from None

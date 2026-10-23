@@ -97,6 +97,37 @@ def test_ready_only_checks_local_auth_without_network(make_provider):
     assert calls == []
 
 
+def test_auditor_search_retains_real_source_metadata_and_domain_filter(make_provider):
+    event = completed('{"sources":[]}')
+    event["response"]["output"].insert(0, {"type": "web_search_call", "action": {
+        "type": "search", "sources": [{"url": "https://midea.com/product"}]}})
+    provider, calls = make_provider(response=httpx.Response(200, content=sse(event)))
+    result = provider.inspect("Research", [{"type": "input_text", "text": "ABC-12-RU"}], search=True, domains=["midea.com"])
+    assert result == {"text": '{"sources":[]}', "sources": ["https://midea.com/product"]}
+    body = json.loads(calls[-1].content)
+    assert body["tools"] == [{"type": "web_search", "filters": {"allowed_domains": ["midea.com"]}}]
+    assert body["include"] == ["web_search_call.action.sources"]
+    assert not {"max_tool_calls", "temperature", "max_output_tokens"}.intersection(body)
+
+
+def test_auditor_vision_sends_images_as_images_without_generation_tools(make_provider):
+    provider, calls = make_provider()
+    content = [{"type": "input_text", "text": "Compare"}, {"type": "input_image", "image_url": "data:image/png;base64,eA==", "detail": "high"}]
+    assert provider.inspect("Compare", content)["text"] == INTENT
+    body = json.loads(calls[-1].content)
+    assert body["input"][-1]["content"] == content
+    assert "tools" not in body
+
+
+def test_auditor_empty_final_output_can_combine_search_items_and_finalized_text(make_provider):
+    item = {"type": "response.output_item.done", "item": {"type": "web_search_call", "action": {
+        "type": "open_page", "url": "https://midea.com/p"}}}
+    stream = sse(item) + sse(finalized_text()) + sse({"type": "response.completed", "response": {"status": "completed", "output": []}})
+    provider, _ = make_provider(response=httpx.Response(200, content=stream))
+    result = provider.inspect("Inspect", [{"type": "input_text", "text": "test"}], search=True)
+    assert result == {"text": INTENT, "sources": ["https://midea.com/p"]}
+
+
 def finalized_text(text=INTENT, output_index=0, content_index=0, item_id="msg_test"):
     return {"type": "response.output_text.done", "output_index": output_index, "content_index": content_index,
             "item_id": item_id, "text": text}

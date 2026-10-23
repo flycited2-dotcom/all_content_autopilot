@@ -1,0 +1,42 @@
+--- a/remote_agent.py
++++ b/remote_agent.py
+@@ -196,6 +196,9 @@
+ 
+ 
+ async def _upload_result(api_url: str, job_id: int, output_path: Path) -> dict:
++    if os.environ.get("PHOTO_AUDIT_ENABLED") == "1":
++        from photo_auditor.integration import require_permit
++        require_permit(Path(os.environ["PHOTO_AUDIT_ROOT"]), f"fotogen-{job_id}", output_path)
+     """POST результата на VPS. Передаём ИМЕННО локальное имя файла
+     (с brand/model) — VPS сохранит под ним же."""
+     headers = {"x-agent-token": VPS_API_TOKEN}
+@@ -463,6 +466,29 @@
+                                 project_url=(LANE.project_url_for(job_mode)
+                                              if LANE else None) or None,
+                             )
++
++                            # Контроль товара до любых outbox/Drive/VPS операций.
++                            if os.environ.get("PHOTO_AUDIT_ENABLED") == "1":
++                                from photo_auditor.integration import AuditHold, checked_output
++                                audit_root = Path(os.environ["PHOTO_AUDIT_ROOT"])
++
++                                async def regenerate_with_audit(notes):
++                                    return await process_one_file(
++                                        tmp_input, mode=job_mode,
++                                        specs=(job_specs or "") + "\n\n" + notes,
++                                        brand=job_brand, model=job_model, cdp_url=CDP_URL,
++                                        project_url=(LANE.project_url_for(job_mode)
++                                                     if LANE else None) or None,
++                                    )
++
++                                try:
++                                    output_path = await checked_output(
++                                        audit_root, f"fotogen-{job_id}", job_brand, job_model,
++                                        output_path, tmp_input, regenerate_with_audit)
++                                except AuditHold as hold:
++                                    last_error = hold
++                                    output_path = None  # нет выгрузки и повторной генерации на общем retry
++                                    break
+                             log.info("Обработано → %s", output_path)
+                             # Сначала фиксируем готовое на диске, затем любые
+                             # сетевые операции: рестарт не теряет результат.

@@ -1,0 +1,11 @@
+# Trust list, not model-generated classification. Add other brands after verification.
+# https://daichi.ru/ ; https://www.midea.com/
+daichi: [daichi.ru]
+midea: [midea.com]
+# Verified manufacturer homepages and regional links, 2026-10-23:
+# https://www.beko.com/ ; https://www.lg.com/
+# https://www.haier.com/choose-country-region.html ; https://www.samsung.com/
+beko: [beko.com]
+lg: [lg.com]
+haier: [haier.com, haier-europe.com]
+samsung: [samsung.com]
