@@ -181,7 +181,7 @@ def test_auditor_uses_actual_images_and_max_five_sources(tmp_path):
             return {**candidate, "official": True, "model_image_verified": True, "model": model, "text": "Midea ABC-12-RU"}, picture(), b"page"
     result = Auditor(root, Provider(), Web()).run(product(), folder)
     assert result["verdict"] == "approved"
-    assert calls[0][2] == ["midea.com"]
+    assert calls[0][2] == ["midea.com", "midearussia.ru"]
     assert len([c for c in calls[-1][0] if c["type"] == "input_image"]) == 2
     assert (folder / "comparison.jpg").is_file()
     assert result["sources"][0]["image_sha256"] == digest(picture())

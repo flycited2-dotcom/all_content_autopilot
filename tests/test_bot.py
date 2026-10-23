@@ -419,6 +419,20 @@ def test_batch_with_planned_time_waits_for_it(deps):
     assert deps.factory.calls == [("publish", ("k1", "k2"))]
 
 
+def test_batch_without_ready_cards_reports_once_and_never_publishes(deps):
+    from orchestrator_bot import feed
+    deps.factory = FeedFactory()
+    log_id = _batch(deps)
+    deps.factory.status_by_call = [{'total': 2, 'ready': 0, 'in_work': 0,
+                                    'published': 0, 'dropped': 2}]
+    feed.tick(deps, NOW)
+    feed.tick(deps, NOW + feed.POLL_EVERY + 1)
+    notices = [text for text in deps.tg.texts() if 'без готовых превью' in text]
+    assert len(notices) == 1 and 'удержаний: 2' in notices[0]
+    assert deps.store.get_batch(log_id)['status'] == 'closed'
+    assert not deps.factory.calls
+
+
 def test_cancel_closes_batch(deps):
     log_id = _batch(deps)
     bot.handle_update(_cb(f"c:{log_id}"), deps)

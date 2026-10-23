@@ -1,12 +1,16 @@
 """One explicitly approved cohort, stable trial ID and read-only progress reports."""
 import argparse
 import base64
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 RUN = ROOT / 'runs/2026-10-23/autopilot'
 
 REMOTE = r'''
@@ -62,6 +66,8 @@ for original in manifest['items']:
  item=pipeline.get(original['key'])
  result['items'].append({'key':original['key'],'brand':original['brand'],'model':original['model'],
                         'status':item.status if item else 'not_submitted',
+                        'error':item.error if item else None,
+                        'tries':item.tries if item else None,
                         'research_job':item.research_job if item else None,
                         'card_job':item.card_job if item else None})
 print(json.dumps(result,ensure_ascii=False))
@@ -87,6 +93,63 @@ def check_installed():
     settings = json.loads(agent_config.read_text(encoding='utf-8-sig'))
     if settings.get('enabled') is not True or Path(settings.get('project_root', '')).resolve() != ROOT:
         raise RuntimeError('Photo agent audit is not enabled')
+
+
+def review_report(value):
+    """Build the owner's evidence sheet from this cohort only; no new checks."""
+    audit_root = ROOT / 'runs/photo-auditor'
+    audits = []
+    database = audit_root / 'audit.sqlite3'
+    if database.is_file():
+        with sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True) as db:
+            db.row_factory = sqlite3.Row
+            audits = [dict(row) for row in db.execute(
+                'SELECT id,product_id,product,created,revision,status,report FROM audits ORDER BY created')]
+    statuses = {'new': 'ожидает обработки', 'research': 'поиск исходного фото',
+                'card': 'генерация карточки', 'preview': 'превью готово',
+                'failed': 'ошибка или удержание', 'held': 'удержано',
+                'cancelled': 'отменено', 'published': 'опубликовано'}
+    verdicts = {'queued': 'в очереди аудита', 'checking': 'аудит выполняется',
+                'approved': 'фото прошло аудит', 'regenerate': 'возвращено на исправление',
+                'review': 'удержано для разбора'}
+
+    def plain(text):
+        return str(text).replace('\n', ' ').replace('[', '\\[').replace(']', '\\]')
+
+    lines = ['# Пробная партия автопилота', '',
+             'Обновлено: ' + datetime.now().astimezone().isoformat(timespec='seconds'), '',
+             '10 товаров: 6 холодильников и 4 стиральные машины. Эта утилита не запускает публикацию.', '',
+             'Снимок состояния обновляется командой `python tools/autopilot_trial.py --report`.', '']
+    for index, item in enumerate(value['items'], 1):
+        lines.extend([f"## {index}. {plain(item['brand'])} {plain(item['model'])}", '',
+                      'Конвейер: ' + statuses.get(item['status'], plain(item['status'])) + '.', ''])
+        if item.get('error'):
+            lines.extend(['Причина: ' + plain(item['error']), ''])
+        job_ids = {f"fotogen-{item[key]}" for key in ('research_job', 'card_job') if item.get(key)}
+        def belongs(row):
+            product = json.loads(row['product'])
+            identity = (product['brand'].casefold(), product['model'].casefold())
+            return row['product_id'] in job_ids or (
+                row['product_id'].startswith('fotogen-') and
+                row['created'] >= (value.get('trial') or {}).get('started', float('inf')) and
+                identity == (item['brand'].casefold(), item['model'].casefold()))
+        matching = [row for row in audits if belongs(row)]
+        if not matching:
+            lines.extend(['Результата фотоаудита пока нет.', ''])
+        for audit in matching:
+            lines.extend([f"{audit['product_id']}, версия {audit['revision']}: " +
+                          verdicts.get(audit['status'], plain(audit['status'])) + '.', ''])
+            if audit['report']:
+                report = json.loads(audit['report'])
+                lines.extend([plain(report.get('reason', '')), ''])
+                image = audit_root / audit['id'] / 'comparison.jpg'
+                if image.is_file():
+                    lines.extend([f'![Результат и эталоны]({image.as_posix()})', ''])
+                path = audit_root / audit['id'] / 'report.json'
+                lines.extend([f'[Полный отчёт]({path.as_posix()})', ''])
+    path = RUN / 'trial-review.md'
+    path.write_text('\n'.join(lines), encoding='utf-8')
+    return path
 
 
 def main():
@@ -116,7 +179,8 @@ def main():
     counts = {}
     for item in value['items']:
         counts[item['status']] = counts.get(item['status'], 0) + 1
-    print(json.dumps({'trial': value['trial'], 'counts': counts}, ensure_ascii=False))
+    report = review_report(value)
+    print(json.dumps({'trial': value['trial'], 'counts': counts, 'review': str(report)}, ensure_ascii=False))
 
 
 if __name__ == '__main__':
