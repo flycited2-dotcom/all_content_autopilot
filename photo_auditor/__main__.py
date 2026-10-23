@@ -8,7 +8,7 @@ from pathlib import Path
 from listener.chatgpt import ChatGPTProvider
 from listener.chatgpt_auth import ChatGPTAuth
 from orchestrator_bot.telegram_api import TelegramApi
-from photo_auditor.credentials import configure, credentials_path, load
+from photo_auditor.credentials import SetupError, configure, credentials_path, load
 from photo_auditor.engine import Auditor
 from photo_auditor.service import make_server, process_one, run_bot, worker_loop
 from photo_auditor.store import AuditStore
@@ -70,6 +70,9 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except SetupError as exc:
+        print("Фотоаудитор: " + str(exc))
+        raise SystemExit(1)
     except Exception as exc:
         # Never show traceback/URLs from Telegram/OAuth clients.
         print("Фотоаудитор: действие не завершено (" + type(exc).__name__ + "). Проверьте подключение и журнал.")
