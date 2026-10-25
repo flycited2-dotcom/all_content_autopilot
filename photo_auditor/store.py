@@ -104,7 +104,7 @@ class AuditStore:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM audits WHERE id=?', (audit_id,)).fetchone()
-            if not row or row['status'] != 'review':
+            if not row or row['status'] not in ('review', 'approved'):
                 return False
             if db.execute('SELECT 1 FROM audits WHERE product_id=? AND revision>?',
                           (row['product_id'], row['revision'])).fetchone():
@@ -139,7 +139,9 @@ class AuditStore:
             return False
         root = self.root.parent.parent
         scope = _read(root, int(match[1]))
-        if (scope.get('mode') not in {'kbt', 'mcp', 'conditioner', 'ready_light', 'ready_tv'} or
+        from photo_auditor.progress import research_specs
+        research = scope.get('mode') == 'research' and bool(research_specs(root, row['product_id'], row['product']['brand'], row['product']['model']))
+        if ((scope.get('mode') not in {'kbt', 'mcp', 'conditioner', 'ready_light', 'ready_tv'} and not research) or
                 not scope.get('required') or
                 (scope.get('brand'), scope.get('model')) != (row['product']['brand'], row['product']['model']) or
                 from_audit(root, row) is None):

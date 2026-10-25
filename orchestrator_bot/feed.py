@@ -160,12 +160,14 @@ def tick(deps, now: float) -> None:
         if status["in_work"]:
             continue                                  # ещё генерируется — ждём всю партию
         if not status["ready"]:
-            if deps.store.move_batch(batch["log_id"], ("open",), "closed"):
+            if deps.store.move_batch(batch["log_id"], ("open",), "failed"):
+                from orchestrator_bot.key_commands import readable_errors
+                detail = readable_errors(status.get('errors', []))
                 deps.tg.send(deps.owner_chat_id,
                     f"⚠️ Партия «{batch['category']}» завершена без готовых превью. "
                     f"Ошибок или удержаний: {status.get('dropped', 0)}.\n"
                     "Причины — в отчётах фотоаудитора @foto_auditor_bot и статусе Никиты. "
-                    "Публикация не запускалась.")
+                    "Публикация не запускалась." + ('\n\n' + detail if detail else ''))
             continue
         deps.store.move_batch(batch["log_id"], ("open",), "ready")
         extra = f", не вышло {status['dropped']}" if status["dropped"] else ""

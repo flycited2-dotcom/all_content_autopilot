@@ -14,3 +14,6 @@ samsung: [samsung.com]
 xiaomi: [mi.com]
 # Verified 2026-10-25: https://willmark.ru/about/ and the manufacturer product catalog.
 willmark: [willmark.ru]
+# Verified 2026-10-25: https://www.blackton.tv/ and https://jvc-rus.ru/.
+blackton: [blackton.tv]
+jvc: [jvc-rus.ru]

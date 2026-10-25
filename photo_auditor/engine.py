@@ -27,6 +27,10 @@ SUPPLIER — исходное фото поставщика, оно может �
 только с источником; отсутствие масштаба само по себе не означает дефект. Скрытые детали и
 нечитаемое обозначение модели нельзя объявлять совпадающими. identity: match означает, что
 видимые отличительные признаки согласуются с эталоном точной модели, а не что прочитан артикул.
+GENERATED обязан показывать основной товар, включая корпус/моторный блок. Одни насадки,
+разобранные детали, упаковка или логотип не являются карточкой целого товара. Если SOURCE
+показывает целый товар, а GENERATED только детали — identity: mismatch и замечание вернуть
+основной товар. Если все SOURCE показывают только детали — identity: not_verifiable.
 Не выводи общий вердикт. Верни только JSON:
 {"checks":[{"aspect":"identity|design|shape|proportions|color|details",
 "status":"match|mismatch|not_verifiable","confidence":0.95,
@@ -79,28 +83,44 @@ def checked_comparison(raw, sources):
     return value
 
 
-def decision(comparison, sources):
-    official_ids = {n for n, source in enumerate(sources, 1) if source["official"] and source.get("model_image_verified")}
-    if not official_ids:
+def decision(comparison, sources, *, manufacturer_unavailable=False):
+    from photo_auditor.evidence import eligible, covers
+    reference_ids, basis = eligible(sources, manufacturer_unavailable)
+    if not reference_ids:
+        if manufacturer_unavailable:
+            from photo_auditor.discovery import owner
+            count = len({owner(s['url']) for s in sources if s.get('model_image_verified')})
+            return 'review', f'Сайт производителя недоступен. Подтверждены {count} независимых каталога точной модели; для резервной проверки нужны минимум три.'
         return "review", "Не подтверждена связь эталонного фото с точной моделью на официальном сайте производителя."
     mismatches = [c for c in comparison["checks"] if c["status"] == "mismatch"]
-    if any(c["confidence"] >= .9 and official_ids.intersection(c["source_ids"]) for c in mismatches):
-        return "regenerate", "Подтверждено видимое расхождение с официальным эталоном."
-    if any(c["status"] != "match" or c["confidence"] < .85 or not official_ids.intersection(c["source_ids"])
+    if any(c['confidence'] >= (.9 if basis == 'official' else .95) and
+           covers(c['source_ids'], reference_ids, sources, basis) for c in mismatches):
+        return 'regenerate', ('Подтверждено видимое расхождение с официальным эталоном.' if basis == 'official' else
+                              'Подтверждено расхождение по трём независимым каталогам; сайт производителя недоступен.')
+    if any(c["status"] != "match" or c["confidence"] < (.85 if basis == 'official' else .9) or
+           not covers(c['source_ids'], reference_ids, sources, basis)
            for c in comparison["checks"]):
         return "review", "Данных недостаточно для уверенного заключения по всем признакам."
-    return "approved", "Видимые признаки товара согласуются с официальным эталоном."
+    return 'approved', ('Видимые признаки товара согласуются с официальным эталоном.' if basis == 'official' else
+                        'Сайт производителя недоступен. Видимые признаки согласуются с тремя независимыми каталогами точной модели.')
 
 
 class Auditor:
     def __init__(self, root, provider, web=None):
-        self.root, self.provider, self.web = Path(root), provider, web or PublicWeb()
+        self.root, self.provider, self.web = Path(root), provider, web or PublicWeb(min_side=400)
         self.brands = yaml.safe_load((self.root / "rules/photo-auditor-manufacturers.yaml").read_text(encoding="utf-8")) or {}
 
-    def _research(self, product, domains, remaining):
+    def _research(self, product, domains, remaining, failed_urls=()):
+        from photo_auditor.connected_research import cached_candidates
+        cached = cached_candidates(self.root, product, domains, remaining, failed_urls)
+        if cached is not None:
+            return cached
         response = self.provider.inspect(RESEARCH, [{"type": "input_text", "text": json.dumps(
             {"brand": product["brand"], "model": product["model"], "source_limit": remaining,
-             "priority": "official manufacturer" if domains else "independent additional sources"}, ensure_ascii=False)}],
+             "priority": "official manufacturer" if domains else "independent additional sources",
+             'required_independent_sources': 1 if domains else min(3, remaining),
+             'unavailable_urls': list(failed_urls),
+             'fallback_instruction': 'При недоступности производителя найди минимум три независимых каталога точной модели; до пяти источников всего. Не повторяй недоступные URL.'}, ensure_ascii=False)}],
             search=True, domains=domains)
         data = strict_json(response["text"])
         if not isinstance(data, dict) or set(data) != {"sources"} or not isinstance(data["sources"], list) or len(data["sources"]) > remaining:
@@ -110,57 +130,35 @@ class Auditor:
     def run(self, product, folder):
         folder = Path(folder)
         domains = self.brands.get(model_key(product["brand"]), [])
-        sources, paths, failures, hosts = [], [folder / "generated.bin"], [], set()
-        # The official search is a separate request with a domain filter.
-        searches = [domains, ()] if domains else [()]
-        for scope in searches:
-            remaining = 5 - len(sources)
-            if not remaining:
-                break
-            candidates, cited = self._research(product, scope, remaining)
-            for candidate in candidates:
-                try:
-                    if not isinstance(candidate, dict) or set(candidate) not in ({'url'}, {'url', 'image_url'}):
-                        raise ValueError("Неверный источник")
-                    from urllib.parse import urlsplit
-                    host = urlsplit(canonical(candidate["url"])).hostname
-                    if host in hosts:
-                        continue
-                    if scope and not official(candidate["url"], domains):
-                        raise ValueError("Результат вне официального домена")
-                    source, photo, html = self.web.reference(candidate, product["model"], cited, domains)
-                    n = len(sources) + 1
-                    path = folder / f"source-{n}.bin"
-                    path.write_bytes(photo)
-                    (folder / f"source-{n}.html").write_bytes(html)
-                    source.update(id=n, image_sha256=digest(photo), page_sha256=digest(html),
-                                  fetched_at=datetime.now(timezone.utc).isoformat())
-                    sources.append(source)
-                    paths.append(path)
-                    hosts.add(host)
-                except (ValueError, KeyError, TypeError, OSError) as exc:
-                    failures.append(type(exc).__name__)
-                except Exception as exc:
-                    # No raw URLs/errors in the report: they can contain access tokens.
-                    failures.append(type(exc).__name__)
-            if scope and any(s['official'] and s.get('model_image_verified') for s in sources):
-                break  # verified manufacturer photo found; additional sites are not mandatory
+        from photo_auditor.discovery import collect
+        from photo_auditor.evidence import eligible
+        sources, reference_paths, failures = collect(product, domains, self._research, self.web, folder)
+        paths = [folder / 'generated.bin', *reference_paths]
+        manufacturer_unavailable = bool(domains and not any(s['official'] and s.get('model_image_verified') for s in sources))
+        _, basis = eligible(sources, manufacturer_unavailable)
         if not sources:
             reason = ('Источники не удалось проверить; автоматического одобрения нет.' if failures
                       else 'Не найдены проверяемые фото точной модели.')
             return {"verdict": "review", "reason": reason,
                     "checks": [], "sources": [], "dimensions_note": "Размеры не проверены.", "source_errors": failures}
-        content = [{"type": "input_text", "text": json.dumps({"product": product, "sources": sources}, ensure_ascii=False)},
+        # The visual checker needs provenance and pixels, not duplicated catalog
+        # navigation/terms. Full downloaded texts remain in the evidence report.
+        references = [{k: v for k, v in source.items() if k != 'text'} for source in sources]
+        content = [{"type": "input_text", "text": json.dumps({"product": product, "sources": references}, ensure_ascii=False)},
                    {"type": "input_text", "text": "GENERATED"}, vision_image(paths[0].read_bytes())]
         supplier = folder / "supplier.bin"
         if supplier.exists():
             content.extend([{"type": "input_text", "text": "SUPPLIER"}, vision_image(supplier.read_bytes())])
         for n, path in enumerate(paths[1:], 1):
             content.extend([{"type": "input_text", "text": f"SOURCE {n}"}, vision_image(path.read_bytes())])
+        if basis == 'secondary_consensus':
+            content.append({'type': 'input_text', 'text': 'Сайт производителя проверен и недоступен. Резервная проверка: '
+                'сверь все независимые каталоги между собой и с GENERATED. Для каждого аспекта укажи минимум три '
+                'источника. При разногласии каталогов, разных вариантах товара или сомнении — not_verifiable.'})
         result = self.provider.inspect(COMPARE, content)
         comparison = checked_comparison(result["text"], sources)
         comparison["dimensions_note"] = "Физические размеры без масштаба не измерены. Пропорции оцениваются только по видимому эталону."
-        verdict, reason = decision(comparison, sources)
+        verdict, reason = decision(comparison, sources, manufacturer_unavailable=manufacturer_unavailable)
         passes = [comparison]
         if verdict == 'approved':
             # Fresh judgement without seeing the first response, focused on invented parts.
@@ -171,7 +169,7 @@ class Auditor:
 сопоставить уверенно, ставь not_verifiable. Предыдущий ответ тебе не передаётся.'''
             second = checked_comparison(self.provider.inspect(instruction, content)['text'], sources)
             passes.append(second)
-            second_verdict, second_reason = decision(second, sources)
+            second_verdict, second_reason = decision(second, sources, manufacturer_unavailable=manufacturer_unavailable)
             if second_verdict != 'approved':
                 comparison, verdict = second, second_verdict
                 reason = 'Второй проход: ' + second_reason
@@ -183,7 +181,8 @@ class Auditor:
         comparison['dimensions_note'] = 'Физические размеры без масштаба не измерены. Пропорции оцениваются только по видимому эталону.'
         comparison_sheet(paths, folder / "comparison.jpg")
         return {**comparison, "verdict": verdict, "reason": reason, "sources": sources,
-                "source_errors": failures, 'comparison_passes': passes}
+                "source_errors": failures, 'comparison_passes': passes,
+                'evidence_basis': basis, 'manufacturer_unavailable': manufacturer_unavailable}
 
 
 def feedback(report):

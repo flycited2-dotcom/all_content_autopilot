@@ -140,7 +140,10 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
             try:
                 if self.path == '/photo-audit-result':
                     from orchestrator_bot.photo_recovery import validate
-                    return self._json(200, factory.reconcile_photo(validate(body)))
+                    result = factory.reconcile_photo(validate(body))
+                    if result.get('resumed') and result.get('item_key'):
+                        store.reopen_recovered_batches(result['item_key'], now=clock())
+                    return self._json(200, result)
                 if self.path == "/heartbeat":
                     store.heartbeat(clock())
                     return self._json(200, {"ok": True})

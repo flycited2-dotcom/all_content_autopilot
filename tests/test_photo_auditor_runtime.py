@@ -81,7 +81,7 @@ def test_generator_patch_gates_research_card_and_both_replay_routes():
             pytest.skip('Installed external bridge has no original source in this checkout')
         source = backup.read_text(encoding='utf-8')
     patched = module.patched(source)
-    if 'PHOTO_AUDIT_BRIDGE_V5' in live:
+    if 'PHOTO_AUDIT_BRIDGE_V6' in live:
         import ast
         assert ast.dump(ast.parse(live)) == ast.dump(ast.parse(patched))
     compile(patched, 'remote_agent.py', 'exec')

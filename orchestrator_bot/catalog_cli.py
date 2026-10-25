@@ -68,7 +68,7 @@ def enqueue(cf, args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'resume-photo'))
+    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'resume-photo', 'batch-status', 'publish-keys', 'cancel'))
     parser.add_argument('--audit-json')
     for name in ('state-db', 'prices-dir', 'queue-db', 'category', 'source', 'quotas', 'btu',
                  'keys-json', 'due'):
@@ -79,10 +79,13 @@ def main(argv=None):
     for flag in ('inverter', 'heat-pump', 'full-dc', 'no-wake'):
         parser.add_argument('--' + flag, action='store_true')
     args = parser.parse_args(argv)
-    if args.command not in ('hint', 'resume-photo') and not args.category:
+    if args.command not in ('hint', 'resume-photo', 'batch-status', 'publish-keys', 'cancel') and not args.category:
         parser.error('--category is required')
     from content_factory import agent_cli as cf
-    if args.command == 'resume-photo':
+    if args.command in ('batch-status', 'publish-keys', 'cancel'):
+        from orchestrator_bot.key_commands import run
+        result = run(cf, args)
+    elif args.command == 'resume-photo':
         from orchestrator_bot.photo_recovery import reconcile
         state, _, queue = cf._paths(args)
         result = reconcile(state, queue, json.loads(args.audit_json or '{}'))

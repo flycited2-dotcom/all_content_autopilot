@@ -7,7 +7,7 @@ import httpx
 class ApiClient:
     def __init__(self, base_url: str, token: str, http: httpx.Client | None = None):
         self.base = base_url.rstrip("/")
-        self.http = http or httpx.Client(timeout=300)    # /intent исполняет задачи синхронно
+        self.http = http or httpx.Client(timeout=300, trust_env=False)  # local SSH transport must bypass proxies
         self.headers = {"X-Orch-Token": token}
 
     def _post(self, path, body):

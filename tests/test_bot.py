@@ -429,7 +429,7 @@ def test_batch_without_ready_cards_reports_once_and_never_publishes(deps):
     feed.tick(deps, NOW + feed.POLL_EVERY + 1)
     notices = [text for text in deps.tg.texts() if 'без готовых превью' in text]
     assert len(notices) == 1 and 'удержаний: 2' in notices[0]
-    assert deps.store.get_batch(log_id)['status'] == 'closed'
+    assert deps.store.get_batch(log_id)['status'] == 'failed'
     assert not deps.factory.calls
 
 

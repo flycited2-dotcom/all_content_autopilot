@@ -12,8 +12,8 @@ sys.path.insert(0, str(ROOT))
 from tools.install_photo_audit import AGENT, atomic
 
 BASELINE = ROOT / 'runs/2026-10-23/autopilot/photo-agent-backup/remote_agent.py'
-RUN = ROOT / 'runs/2026-10-25/photo-upgrade-v5'
-EXPECTED_SOURCE_SHA = '92d2620de8b018022c36d272c04b72c3e5a84bf9ed41aaa2ed077415fd4c617d'
+RUN = ROOT / 'runs/2026-10-25/photo-upgrade-v6'
+EXPECTED_SOURCE_SHA = '72ae77430ebe8e2c9824d726bf58ecda156520df6ce4b1684850b80acef423f9'
 
 
 def main():

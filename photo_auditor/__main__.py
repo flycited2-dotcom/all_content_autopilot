@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 from listener.chatgpt import ChatGPTProvider
@@ -10,7 +11,7 @@ from listener.chatgpt_auth import ChatGPTAuth
 from orchestrator_bot.telegram_api import TelegramApi
 from photo_auditor.credentials import SetupError, configure, credentials_path, load
 from photo_auditor.engine import Auditor
-from photo_auditor.service import make_server, process_one, run_bot, worker_loop
+from photo_auditor.service import make_server, process_one, run_bot, worker_loop, watch_parent
 from photo_auditor.store import AuditStore
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,11 +55,25 @@ def main(argv=None):
         print(json.dumps({"id": result["id"], "status": result["status"],
                           "report": str(store.root / job["id"] / "report.json")}, ensure_ascii=False))
         return 0 if result["report"] else 2
+    from listener.lifecycle import acquire_instance_lock
+    # During Task Scheduler's Restart the old child can still be finishing its
+    # Telegram long poll. Wait for its parent watcher instead of exiting early
+    # and leaving both old and new instances stopped.
+    for attempt in range(91):
+        lock = acquire_instance_lock(8794)
+        if lock is not None:
+            break
+        if attempt < 90:
+            time.sleep(.5)
+    if lock is None:
+        print('Фотоаудитор уже запущен')
+        return 0
     config = load(ROOT)
     server = make_server(store, config["api_token"])
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.FileHandler(store.root / "service.log", encoding="utf-8")])
     stop = threading.Event()
+    threading.Thread(target=watch_parent, args=(os.getppid(), stop), daemon=True).start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=worker_loop, args=(store, auditor, stop), daemon=True).start()
     tg = TelegramApi(config["bot_token"])
@@ -70,6 +85,7 @@ def main(argv=None):
         stop.set()
         server.shutdown()
         server.server_close()
+        lock.close()
     return 0
 
 

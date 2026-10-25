@@ -103,13 +103,31 @@ def worker_loop(store, auditor, stop):
             stop.wait(2)
 
 
+def watch_parent(parent, stop):
+    """Task Scheduler stops conhost, so its Python child must stop itself."""
+    from listener.lifecycle import parent_alive
+    while not stop.wait(2):
+        if not parent_alive(parent):
+            log.info('Родительский процесс завершён — фотоаудитор останавливается')
+            stop.set()
+
+
 def notify(store, tg, owner):
     for row in store.waiting_notifications():
         tg.send(owner, f"⏳ {row['product']['brand']} {row['product']['model']}: фото сохранено. "
                        "Проверка ожидает доступности ChatGPT и продолжится автоматически. Новая генерация не запускается.")
         store.notified(row['id'])
     for row in store.pending_notifications():
-        if row['product_id'].startswith('fotogen-') and row['status'] == 'regenerate':
+        generated_job = re.fullmatch(r'fotogen-([1-9][0-9]*)', row['product_id'])
+        intermediate = bool(generated_job and row['status'] == 'regenerate')
+        if generated_job and row['status'] == 'approved':
+            from photo_auditor import runtime
+            root = store.root.parent.parent
+            job_id = int(generated_job[1])
+            scope_path = root / 'runs/photo-auditor/job-scope' / (str(job_id) + '.json')
+            if scope_path.exists():
+                intermediate = runtime._read(root, job_id).get('mode') == 'research'
+        if intermediate:
             # The generator receives this feedback over the API. Do not flood the
             # owner with intermediate revisions that are already being corrected.
             store.notified(row['id'])
@@ -149,6 +167,15 @@ def recover_pipeline(store, deliver=None):
         match = re.fullmatch(r'fotogen-([1-9][0-9]*)', row['product_id'])
         if not match:
             continue
+        # Research can resume only together with its frozen, verified facts.
+        from photo_auditor import runtime, progress
+        root = store.root.parent.parent
+        scope_path = root / 'runs/photo-auditor/job-scope' / (match[1] + '.json')
+        if scope_path.exists():
+            scope = runtime._read(root, int(match[1]))
+            if scope.get('mode') == 'research' and not progress.restore_research(
+                    root, row['product_id'], row['product']['brand'], row['product']['model']):
+                continue
         payload = {'job_id': int(match[1]), 'audit_id': row['id'], 'attempt': row['attempt'],
                    'revision': row['revision'], 'status': row['status'], 'sha256': row['sha256'],
                    'brand': row['product']['brand'], 'model': row['product']['model']}

@@ -183,6 +183,7 @@ def test_auditor_uses_actual_images_and_max_five_sources(tmp_path):
     assert result["verdict"] == "approved"
     assert calls[0][2] == ["midea.com", "midearussia.ru"]
     assert len([c for c in calls[-1][0] if c["type"] == "input_image"]) == 2
+    assert 'text' not in json.loads(calls[-1][0][0]['text'])['sources'][0]
     assert (folder / "comparison.jpg").is_file()
     assert result["sources"][0]["image_sha256"] == digest(picture())
 

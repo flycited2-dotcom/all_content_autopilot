@@ -207,6 +207,17 @@ class Store:
                              (dst, now or time.time(), log_id, *src))
         return cur.rowcount == 1
 
+    def reopen_recovered_batches(self, key: str, now=None) -> int:
+        """Late audit recovery reopens failed batches, preserving owner cancellation."""
+        changed = 0
+        with self._c() as db:
+            rows = db.execute("SELECT log_id,keys FROM batches WHERE status='failed'").fetchall()
+            for row in rows:
+                if key in json.loads(row['keys']):
+                    changed += db.execute("UPDATE batches SET status='open',updated=? WHERE log_id=? AND status='failed'",
+                                          (now or time.time(), row['log_id'])).rowcount
+        return changed
+
     # ── черновики оркестратора (этап 3) ──
     def add_draft(self, draft: dict, base: str, now=None) -> bool:
         """False — эта версия уже пришла (повтор от слушателя)."""

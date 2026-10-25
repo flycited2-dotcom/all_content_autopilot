@@ -6,9 +6,11 @@ import re
 
 def model_name(value):
     # Supplier model fields sometimes append a color; retain the exact SKU prefix.
+    value = re.split(r'\s*\((?=\s*\d[\d.,]*\s*(?:к?вт|w|кг|kg|л|l|см|мм|об)\b)',
+                     str(value or '').strip(), maxsplit=1, flags=re.I)[0].rstrip()
     return re.split(r'\s+(?=(?:бел(?:ый|ая|ое)|ч[её]рн(?:ый|ая|ое)|графитов(?:ый|ая|ое)|'
                     r'серебрист(?:ый|ая|ое)|сер(?:ый|ая|ое)|бежев(?:ый|ая|ое))\b)',
-                    str(value or '').strip(), maxsplit=1, flags=re.I)[0]
+                    value, maxsplit=1, flags=re.I)[0]
 
 
 def brand_key(value):

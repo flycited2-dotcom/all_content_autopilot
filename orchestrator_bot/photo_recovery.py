@@ -43,14 +43,15 @@ def reconcile(state_path, queue_path, value):
         identity = (value['brand'].strip().casefold(), value['model'].strip().casefold())
         if identity != (str(job[2]).strip().casefold(), str(job[3]).strip().casefold()):
             raise ValueError('Номенклатура задания не совпадает с проверкой')
-        if job[1] not in ('kbt', 'mcp', 'conditioner', 'ready_light', 'ready_tv'):
+        if job[1] not in ('kbt', 'mcp', 'conditioner', 'ready_light', 'ready_tv', 'research'):
             return {'handled': True, 'reason': 'not_a_card'}
         if job[0] in ('pending', 'processing'):
             return {'handled': False, 'reason': 'in_flight'}
         if job[0] != 'failed':
             return {'handled': True, 'reason': 'already_finished'}
-        item = db.execute('SELECT key,status FROM excel_items WHERE card_job=?', (value['job_id'],)).fetchall()
-        if len(item) != 1 or item[0][1] not in ('failed', 'card'):
+        stage = 'research' if job[1] == 'research' else 'card'
+        item = db.execute('SELECT key,status FROM excel_items WHERE ' + stage + '_job=?', (value['job_id'],)).fetchall()
+        if len(item) != 1 or item[0][1] not in ('failed', stage):
             return {'handled': True, 'reason': 'not_an_active_factory_item'}
         if not any(marker in (job[4] or '') for marker in (
                 'Фото остановлено для ручной проверки:', 'Контроль ещё не завершён;',
@@ -59,8 +60,9 @@ def reconcile(state_path, queue_path, value):
         db.execute("UPDATE photo_queue.jobs SET status='pending',claimed_by=NULL,claimed_at=NULL,"
                    'error_text=NULL,updated_at=? WHERE id=? AND status=\'failed\'',
                    (datetime.now().isoformat(), value['job_id']))
-        db.execute("UPDATE excel_items SET status='card',error=NULL WHERE key=? AND card_job=?",
-                   (item[0][0], value['job_id']))
-        result = {'handled': True, 'resumed': True, 'job_id': value['job_id'], 'new_job_created': False}
+        db.execute('UPDATE excel_items SET status=?,error=NULL WHERE key=? AND ' + stage + '_job=?',
+                   (stage, item[0][0], value['job_id']))
+        result = {'handled': True, 'resumed': True, 'job_id': value['job_id'], 'new_job_created': False,
+                  'item_key': item[0][0]}
         db.execute('INSERT INTO photo_audit_recoveries VALUES(?,?)', (receipt, json.dumps(result)))
     return result

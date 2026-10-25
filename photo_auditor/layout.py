@@ -93,6 +93,15 @@ async def render_card(source, output, brand, model, specs):
                 image.onerror = () => resolve(false); image.src = node.getAttribute('href'); })''')
             if not valid:
                 raise ValueError('Не удалось отобразить исходную фотографию')
+            for font in (30, 28, 26):
+                if await page.locator('.facts').evaluate('(node) => node.scrollHeight <= node.clientHeight'):
+                    break
+                await page.locator('.facts').evaluate('''(node, size) => {
+                    node.querySelector('ul').style.gap = '16px';
+                    for (const row of node.querySelectorAll('li')) {
+                        row.style.fontSize = size + 'px'; row.style.padding = '18px 20px';
+                    }
+                }''', font)
             if not await page.locator('.facts').evaluate('(node) => node.scrollHeight <= node.clientHeight'):
                 raise ValueError('Характеристики не помещаются в карточку; требуется другой макет')
             if not await page.locator('main').evaluate('''(node) => [...node.querySelectorAll('header,.body,footer')]

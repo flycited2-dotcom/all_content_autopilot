@@ -2,11 +2,13 @@
 import ipaddress
 import re
 import socket
+import io
 from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
+from PIL import Image
 
 from photo_auditor.images import image_bytes
 
@@ -39,11 +41,29 @@ class Page(HTMLParser):
         super().__init__()
         self.text, self.images, self.skip = [], set(), 0
         self.primary_images, self.structured, self._ld = set(), [], None
+        self.image_order = []
         self.headings, self._heading = [], 0
         self.named_images = []
+        self.micro_products, self._elements = [], []
 
     def handle_starttag(self, tag, attrs):
         attr = dict(attrs)
+        micro = self._elements[-1][1] if self._elements else None
+        if re.search(r'(?:^|/)Product/?$', attr.get('itemtype', '')):
+            micro = {'names': [], 'images': set()}
+            self.micro_products.append(micro)
+        prop = attr.get('itemprop', '').split()
+        if micro is not None:
+            if 'name' in prop and attr.get('content'):
+                micro['names'].append(attr['content'])
+            if 'image' in prop:
+                value = attr.get('content') or attr.get('src') or attr.get('href')
+                if value:
+                    micro['images'].add(value)
+                    self.images.add(value)
+                    self.image_order.append(value)
+        if tag not in {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'}:
+            self._elements.append((tag, micro, 'name' in prop))
         if tag in ("h1", "title"):
             self._heading += 1
         if tag in ("style", "script"):
@@ -53,22 +73,29 @@ class Page(HTMLParser):
         if tag == "meta" and attr.get("property", attr.get("name", "")).lower() in ("og:image", "twitter:image"):
             self.images.add(attr.get("content", ""))
             self.primary_images.add(attr.get("content", ""))
+            self.image_order.append(attr.get('content', ''))
         if tag == "img":
             names = ' '.join(attr.get(k, '') for k in ('alt', 'title', 'aria-label'))
             for key in ("src", "data-src", "data-original", "data-large", "data-zoom-image"):
                 if attr.get(key) and not attr[key].startswith('data:'):
                     self.images.add(attr[key])
                     self.named_images.append((names, attr[key]))
+                    self.image_order.append(attr[key])
             for key in ("srcset", "data-srcset"):
                 for part in attr.get(key, "").split(","):
                     if part.strip():
                         url = part.strip().split()[0]
                         self.images.add(url)
                         self.named_images.append((names, url))
+                        self.image_order.append(url)
         if tag == "a" and re.search(r"\.(?:png|jpg|jpeg|webp)(?:\?|$)", attr.get("href", ""), re.I):
             self.images.add(attr["href"])
 
     def handle_endtag(self, tag):
+        for n in range(len(self._elements) - 1, -1, -1):
+            if self._elements[n][0] == tag:
+                del self._elements[n:]
+                break
         if tag in ("h1", "title"):
             self._heading = max(0, self._heading - 1)
         if tag == "script" and self._ld is not None:
@@ -82,6 +109,8 @@ class Page(HTMLParser):
             self.skip = max(0, self.skip - 1)
 
     def handle_data(self, data):
+        if self._elements and self._elements[-1][1] is not None and self._elements[-1][2]:
+            self._elements[-1][1]['names'].append(data)
         if self._heading:
             self.headings.append(data)
         if self._ld is not None:
@@ -95,6 +124,12 @@ class Page(HTMLParser):
         found = set(self.primary_images) if heading_matches else set()
         if heading_matches:
             found.update(url for names, url in self.named_images if contains_model(names, model))
+        for n, product in enumerate(self.micro_products):
+            name = ' '.join(product['names']).strip()
+            # The main Product may inherit the page's exact H1 when its name is
+            # empty. Later/related products must identify their own model.
+            if contains_model(name, model) or n == 0 and not name and heading_matches:
+                found.update(product['images'])
         def walk(value, depth=0):
             if depth > 15:
                 return
@@ -126,9 +161,10 @@ class Page(HTMLParser):
 
 
 class PublicWeb:
-    def __init__(self, client=None, resolver=socket.getaddrinfo):
+    def __init__(self, client=None, resolver=socket.getaddrinfo, min_side=0):
         self.client = client or httpx.Client(timeout=25, follow_redirects=False, trust_env=False)
         self.resolver = resolver
+        self.min_side = min_side
 
     def fetch(self, url, maximum):
         url = canonical(url)
@@ -168,7 +204,7 @@ class PublicWeb:
         final, html = self.fetch(url, 3 * 1024 * 1024)
         page = Page()
         page.feed(html.decode("utf-8", errors="replace"))
-        text = unescape(" ".join(page.text))
+        text = re.sub(r'\s+', ' ', unescape(' '.join(page.text))).strip()
         if not contains_model(text, model):
             raise ValueError("На странице нет точной номенклатуры")
         linked = set()
@@ -183,21 +219,42 @@ class PublicWeb:
                 primary.add(canonical(urljoin(final, value)))
             except ValueError:
                 pass
+        ordered = {}
+        for n, value in enumerate(page.image_order):
+            try:
+                ordered.setdefault(canonical(urljoin(final, value)), n)
+            except ValueError:
+                pass
+        def quality(value):
+            path = urlsplit(value).path.casefold()
+            thumbnail = bool(re.search(r'(?:small|thumb|thumbnail|/\d{1,2}_\d{1,2}_|/fit/\d{1,2}/\d{1,2}/)', path))
+            large = bool(re.search(r'(?:original|large|zoom|fullsize)', path))
+            # Product galleries put the assembled product before accessories.
+            # Alphabetic/hash/URL-length sorting can silently pick a spare part.
+            return (thumbnail, not large, ordered.get(value, 10**9), len(value), value)
         if candidate.get('image_url'):
             image_url = canonical(urljoin(final, candidate['image_url']))
+            if image_url not in linked | primary:
+                raise ValueError('Эталонное фото не связано со страницей товара')
+            candidates = [image_url, *sorted(primary - {image_url}, key=quality)]
         elif primary:
             # The page, not a guessed model URL, supplies the actual product image.
-            def quality(value):
-                path = urlsplit(value).path.casefold()
-                thumbnail = bool(re.search(r'(?:small|thumb|thumbnail|/\d{1,2}_\d{1,2}_|/fit/\d{1,2}/\d{1,2}/)', path))
-                large = bool(re.search(r'(?:original|large|zoom|fullsize)', path))
-                return (thumbnail, not large, model_key(model) not in model_key(path), len(value), value)
-            image_url = min(primary, key=quality)
+            candidates = sorted(primary, key=quality)
         else:
             raise ValueError('На странице не подтверждена связь фотографии с точной моделью')
-        if image_url not in linked | primary:
-            raise ValueError("Эталонное фото не связано со страницей товара")
-        _, photo = self.fetch(image_url, 10 * 1024 * 1024)
-        return {"url": final, "image_url": image_url, "official": official(final, domains),
-                "model_image_verified": image_url in primary,
-                "model": model, "text": text[:16000]}, image_bytes(photo), html
+        last = None
+        for image_url in candidates[:6]:
+            try:
+                _, photo = self.fetch(image_url, 10 * 1024 * 1024)
+                image_bytes(photo)
+                with Image.open(io.BytesIO(photo)) as image:
+                    if min(image.size) < self.min_side:
+                        raise ValueError('Фотография слишком мала для проверки деталей')
+                return {"url": final, "image_url": image_url, "official": official(final, domains),
+                        "model_image_verified": image_url in primary,
+                        "model": model, "text": text[:16000]}, photo, html
+            except (httpx.HTTPError, ValueError) as exc:
+                last = exc
+        if last is not None:
+            raise last
+        raise ValueError('Нет доступного фото товара')

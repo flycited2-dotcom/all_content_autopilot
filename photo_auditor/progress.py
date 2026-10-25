@@ -30,6 +30,32 @@ def rejected(root, product_id, brand, model):
         'brand': brand, 'model': model, 'revision': 0, 'phase': 'rejected'})
 
 
+def save_research(root, product_id, brand, model, specs):
+    if not isinstance(specs, str) or not 0 < len(specs) <= 30000:
+        raise ValueError('Нет сохранённых характеристик')
+    write_json(folder(root, product_id) / 'research.json', {'product_id': product_id, 'brand': brand,
+        'model': model, 'kind': 'verified_assets', 'specs': specs, 'sha256': digest(specs.encode())})
+
+
+def research_specs(root, product_id, brand, model):
+    from photo_auditor.integration import AuditHold
+    path = folder(root, product_id) / 'research.json'
+    if not path.exists():
+        return None
+    value = json.loads(path.read_text(encoding='utf-8'))
+    if (value.get('product_id'), value.get('brand'), value.get('model'), value.get('kind')) != (product_id, brand, model, 'verified_assets'):
+        raise AuditHold('Изменилась номенклатура сохранённого исследования')
+    if digest(value['specs'].encode()) != value.get('sha256'):
+        raise AuditHold('Сохранённые характеристики изменились')
+    return value['specs']
+
+
+def restore_research(root, product_id, brand, model):
+    specs = research_specs(root, product_id, brand, model)
+    saved = restore(root, product_id, brand, model) if specs else None
+    return {**saved, 'specs': specs} if saved else None
+
+
 def _save_supplier(root, product_id, brand, model, source):
     data = image_bytes(Path(source).read_bytes())
     path = folder(root, product_id)

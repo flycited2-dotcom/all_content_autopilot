@@ -11,7 +11,7 @@ def patched(source):
     if 'PHOTO_AUDIT_BRIDGE_V' in source or 'Контроль товара до любых outbox' in source:
         raise ValueError("Интеграция уже присутствует")
     bootstrap = '''
-# PHOTO_AUDIT_BRIDGE_V5: native composition, verified reference repair, two-pass audit.
+# PHOTO_AUDIT_BRIDGE_V6: connected source research, durable facts, independent photo audit.
 AUDIT_ROOT = None
 class PhotoAuditHold(RuntimeError):
     pass
@@ -28,13 +28,23 @@ if _audit_settings.exists():
         from photo_auditor.integration import AuditHold as PhotoAuditHold, checked_output
         from photo_auditor.runtime import register_job, requires_audit, guard_upload
         from photo_auditor.progress import restore as restore_audit_output, starting as start_audit_generation, rejected as audit_generation_rejected
+        from photo_auditor.progress import save_research, restore_research
         from photo_auditor.layout import render_card as render_exact_product_card
-        from photo_auditor.reference_asset import latest as verified_reference_asset
-        from photo_auditor.research import search_product, SourceUnavailable
+        from photo_auditor.reference_asset import latest as verified_reference_asset, typed as typed_source_photo
+        from photo_auditor.research import SourceUnavailable
+        from photo_auditor.connected_research import research as connected_research
+        from listener.provider_errors import ProviderError as ResearchProviderError
         from uuid import uuid4 as audit_uuid
         _original_product_research = process_research
-        async def process_research(*args, **kwargs):
-            return await search_product(_original_product_research, *args, **kwargs)
+        async def process_research(brand, model, category, **kwargs):
+            if (category or "").strip().casefold() == "editorial":
+                return await _original_product_research(brand, model, category, **kwargs)
+            try:
+                return await connected_research(AUDIT_ROOT, brand, model, category)
+            except ResearchProviderError as error:
+                if error.kind in ("usage_limit", "network", "rate_limit"):
+                    raise UploadLimitError("Поиск ожидает ChatGPT: " + error.kind) from None
+                raise PhotoAuditHold("Для поиска требуется проверить подключение ChatGPT") from None
 '''
     bind = '''                            if AUDIT_ROOT is not None:
                                 register_job(AUDIT_ROOT, job_id, job_mode, job_brand, job_model, job_specs)
@@ -58,16 +68,22 @@ if _audit_settings.exists():
     research_gate = '''                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
                                 async def regenerate_research_with_audit(notes):
                                     nonlocal utp
-                                    result_photo, utp = await process_research(
-                                        job_brand, job_model, (job_specs or "") + "\\n\\n" + notes,
-                                        cdp_url=CDP_URL,
-                                        project_url=(LANE.project_url_for("research") if LANE else None) or None)
+                                    reference = verified_reference_asset(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
+                                    if reference:
+                                        result_photo = typed_source_photo(reference)
+                                    else:
+                                        result_photo, utp = await process_research(
+                                            job_brand, job_model, (job_specs or "") + "\\n\\n" + notes,
+                                            cdp_url=CDP_URL,
+                                            project_url=(LANE.project_url_for("research") if LANE else None) or None)
+                                    save_research(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model, utp)
                                     return result_photo
                                 if photo is None:
                                     raise PhotoAuditHold("Research did not return a product photo")
                                 photo = await checked_output(
                                     AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model,
-                                    photo, None, regenerate_research_with_audit)
+                                    photo, None, regenerate_research_with_audit,
+                                    start_revision=research_revision, repair_reference=True)
 '''
     upload_guard = '''    if AUDIT_ROOT is not None:
         guard_upload(AUDIT_ROOT, job_id, output_path)
@@ -134,9 +150,31 @@ if _audit_settings.exists():
                             else:
 ''' + '\n'.join('    ' + line for line in call.splitlines())
     source = source[:begin] + card_start + source[end:]
+    research_anchor = '                            photo, utp = await process_research('
+    begin = source.index(research_anchor)
+    research_end = '\n                                             if LANE else None) or None)'
+    end = source.index(research_end, begin) + len(research_end)
+    research_call = source[begin:end]
+    research_start = bind + '''                            research_revision = 0
+                            restored_research = None
+                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
+                                restored_research = restore_research(
+                                    AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
+                            if restored_research:
+                                photo, utp = restored_research["path"], restored_research["specs"]
+                                research_revision = restored_research["revision"]
+                            else:
+''' + '\n'.join('    ' + line for line in research_call.splitlines()) + '''
+                                if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
+                                    frozen_research = restore_audit_output(
+                                        AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
+                                    if frozen_research:
+                                        photo, research_revision = frozen_research["path"], frozen_research["revision"]
+                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
+                                save_research(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model, utp)'''
+    source = source[:begin] + research_start + source[end:]
     replacements = [
         ('import upload_outbox  # noqa: E402\n', 'import upload_outbox  # noqa: E402\n' + bootstrap),
-        ('                            photo, utp = await process_research(', bind + '                            photo, utp = await process_research('),
         ('                            log.info("Обработано → %s", output_path)', card_gate + '                            log.info("Обработано → %s", output_path)'),
         ('                            journal = upload_outbox.stage(\n                                OUTBOX_DIR, job_id, "research",', research_gate + '                            journal = upload_outbox.stage(\n                                OUTBOX_DIR, job_id, "research",'),
         ('async def _upload_result(api_url: str, job_id: int, output_path: Path) -> dict:\n',
