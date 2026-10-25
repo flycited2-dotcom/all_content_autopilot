@@ -9,13 +9,13 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / 'runs/2026-10-23/autopilot/server-manifest.json'
 
 REMOTE = r'''
-import hashlib,json,os,pathlib,shutil,sqlite3,subprocess,time,urllib.request,urllib.error
+import hashlib,json,os,pathlib,re,shutil,sqlite3,subprocess,time,urllib.request,urllib.error
 from datetime import datetime,timezone
 base=pathlib.Path('/opt/agents-my')
 stage=pathlib.Path(manifest['staging'])
 live=base/'orchestrator_bot'
 assert base.resolve()==base and stage.resolve()==stage and live.resolve()==live
-assert stage.parent==base/'.deploy' and stage.name=='autopilot-20261023'
+assert stage.parent==base/'.deploy' and re.fullmatch(r'autopilot-[0-9]{8}(?:-[0-9]{6})?',stage.name)
 def hashes(folder):
  return {'orchestrator_bot/'+p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.glob('*.py')}
 assert hashes(live)==manifest['before'], 'Live source changed; deployment stopped'
@@ -61,8 +61,10 @@ print(json.dumps(result))
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--manifest', type=Path, default=MANIFEST)
     args = parser.parse_args()
-    manifest = json.loads(MANIFEST.read_text(encoding='utf-8'))
+    manifest_path = args.manifest.resolve()
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     if not args.apply:
         print(json.dumps({'apply': False, 'changed': manifest['changed'], 'staging': manifest['staging']}))
         return
@@ -74,7 +76,7 @@ def main():
         raise RuntimeError('Deployment failed; original service restoration was attempted. ' +
                            process.stderr.decode('utf-8', errors='replace')[-1000:])
     output = process.stdout.decode('utf-8')
-    (MANIFEST.parent / 'server-deployed.json').write_text(output, encoding='utf-8')
+    (manifest_path.parent / 'server-deployed.json').write_text(output, encoding='utf-8')
     print(output)
 
 

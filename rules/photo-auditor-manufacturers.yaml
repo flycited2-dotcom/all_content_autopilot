@@ -12,3 +12,5 @@ haier: [haier.com, haier-europe.com]
 samsung: [samsung.com]
 # Verified official Xiaomi TV catalog: https://www.mi.com/ru/product-list/tv-media/
 xiaomi: [mi.com]
+# Verified 2026-10-25: https://willmark.ru/about/ and the manufacturer product catalog.
+willmark: [willmark.ru]

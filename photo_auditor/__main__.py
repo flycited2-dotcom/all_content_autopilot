@@ -23,6 +23,8 @@ def main(argv=None):
     config.add_argument("--console", action="store_true")
     commands.add_parser("status")
     commands.add_parser("run")
+    recheck = commands.add_parser('recheck', help='Повторить проверку сохранённого файла без новой генерации')
+    recheck.add_argument('audit_id')
     check = commands.add_parser("check", help="Проверить локальный файл без отправки в Telegram")
     check.add_argument("image", type=Path)
     check.add_argument("--brand", required=True)
@@ -35,6 +37,10 @@ def main(argv=None):
         print(json.dumps(configure(ROOT, args.console), ensure_ascii=False))
         return 0
     store = AuditStore(ROOT / "runs/photo-auditor")
+    if args.command == 'recheck':
+        accepted = store.recheck(args.audit_id)
+        print(json.dumps({'queued': accepted, 'new_generation': False}))
+        return 0 if accepted else 2
     if args.command == "status":
         print(json.dumps({"bot_configured": credentials_path(ROOT).is_file(), "jobs": store.status(),
                           "chatgpt_connected": ChatGPTAuth(ROOT).ready()}, ensure_ascii=False))

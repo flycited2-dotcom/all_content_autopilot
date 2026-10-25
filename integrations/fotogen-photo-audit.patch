@@ -1,13 +1,15 @@
 --- a/remote_agent.py
 +++ b/remote_agent.py
-@@ -74,6 +74,21 @@
+@@ -74,6 +74,31 @@
  from worker_lease_client import claim_lease  # noqa: E402
  import upload_cooldown  # noqa: E402
  import upload_outbox  # noqa: E402
 +
-+# PHOTO_AUDIT_BRIDGE_V2: local settings contain no credentials.
++# PHOTO_AUDIT_BRIDGE_V5: native composition, verified reference repair, two-pass audit.
 +AUDIT_ROOT = None
 +class PhotoAuditHold(RuntimeError):
++    pass
++class SourceUnavailable(RuntimeError):
 +    pass
 +_audit_settings = ROOT / "photo-audit.json"
 +if _audit_settings.exists():
@@ -19,10 +21,18 @@
 +        sys.path.insert(0, str(AUDIT_ROOT))
 +        from photo_auditor.integration import AuditHold as PhotoAuditHold, checked_output
 +        from photo_auditor.runtime import register_job, requires_audit, guard_upload
++        from photo_auditor.progress import restore as restore_audit_output, starting as start_audit_generation, rejected as audit_generation_rejected
++        from photo_auditor.layout import render_card as render_exact_product_card
++        from photo_auditor.reference_asset import latest as verified_reference_asset
++        from photo_auditor.research import search_product, SourceUnavailable
++        from uuid import uuid4 as audit_uuid
++        _original_product_research = process_research
++        async def process_research(*args, **kwargs):
++            return await search_product(_original_product_research, *args, **kwargs)
  
  # Кулдаун при «Максимальное количество загрузок» — persistентный файл (переживает
  # рестарт процесса/ПК), см. upload_cooldown.py. Retry-шторм 2026-07-03 не давал
-@@ -196,6 +211,8 @@
+@@ -196,6 +221,8 @@
  
  
  async def _upload_result(api_url: str, job_id: int, output_path: Path) -> dict:
@@ -31,7 +41,7 @@
      """POST результата на VPS. Передаём ИМЕННО локальное имя файла
      (с brand/model) — VPS сохранит под ним же."""
      headers = {"x-agent-token": VPS_API_TOKEN}
-@@ -214,6 +231,16 @@
+@@ -214,6 +241,16 @@
  async def _deliver_entry(api_url: str, journal: Path, entry: dict) -> None:
      job_id = entry["job_id"]
      output_path = Path(entry["output_path"]) if entry["output_path"] else None
@@ -48,7 +58,7 @@
      if output_path and not output_path.is_file():
          raise FileNotFoundError(f"outbox job {job_id}: file missing: {output_path}")
      if entry["kind"] == "card":
-@@ -344,11 +371,26 @@
+@@ -344,11 +381,26 @@
                                  # пауза побольше: не долбить ChatGPT (жалоба на
                                  # «слишком много запросов» 2026-07-02)
                                  await asyncio.sleep(60)
@@ -75,43 +85,92 @@
                              journal = upload_outbox.stage(
                                  OUTBOX_DIR, job_id, "research",
                                  photo if photo and photo.exists() else None, utp)
-@@ -363,6 +405,9 @@
+@@ -363,6 +415,12 @@
                                  last_error = "upload_pending"
                                  break
                              last_error = e
 +                        except PhotoAuditHold as hold:
 +                            last_error = hold
 +                            break
++                        except SourceUnavailable as unavailable:
++                            last_error = unavailable
++                            break
                          except (UploadLimitError, GenerationRateLimitError) as e:
                              # Лимит относится к аккаунту, поэтому три быстрых
                              # повтора только продлевают блокировку. Сохраняем
-@@ -456,6 +501,8 @@
+@@ -428,6 +486,18 @@
+ 
+                 # --- Скачиваем входной файл ---
+                 r = await client.get(f"{api_url}/api/input/{job_id}", headers=headers)
++                if r.status_code == 404 and AUDIT_ROOT is not None:
++                    try:
++                        register_job(AUDIT_ROOT, job_id, job_mode, job_brand, job_model, job_specs)
++                        frozen = restore_audit_output(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
++                        if frozen and frozen.get("supplier"):
++                            r = httpx.Response(200, content=frozen["supplier"].read_bytes(),
++                                               request=httpx.Request("GET", f"{api_url}/api/input/{job_id}"))
++                            log.info("Исходник %d восстановлен из снимка контроля", job_id)
++                    except PhotoAuditHold as hold:
++                        await client.post(f"{api_url}/api/fail/{job_id}", headers=headers,
++                                          data={"error": str(hold)})
++                        continue
+                 if r.status_code == 404:
+                     # Входной файл пропал из input/ (блуждающая грабля VPS) — задача
+                     # битая, ретраи бессмысленны: это не сеть. Без fail она вечно
+@@ -456,13 +526,45 @@
                                  await asyncio.sleep(15)
  
                              # --- Обрабатываем через ChatGPT ---
+-                            output_path = await process_one_file(
+-                                tmp_input, mode=job_mode, specs=job_specs,
+-                                brand=job_brand, model=job_model,
+-                                cdp_url=CDP_URL,
+-                                project_url=(LANE.project_url_for(job_mode)
+-                                             if LANE else None) or None,
+-                            )
 +                            if AUDIT_ROOT is not None:
 +                                register_job(AUDIT_ROOT, job_id, job_mode, job_brand, job_model, job_specs)
-                             output_path = await process_one_file(
-                                 tmp_input, mode=job_mode, specs=job_specs,
-                                 brand=job_brand, model=job_model,
-@@ -463,6 +510,16 @@
-                                 project_url=(LANE.project_url_for(job_mode)
-                                              if LANE else None) or None,
-                             )
++                            restored_audit = None
++                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
++                                restored_audit = restore_audit_output(
++                                    AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
++                            if restored_audit:
++                                output_path = restored_audit["path"]
++                            elif AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
++                                # Product geometry is an asset, not something to redraw.
++                                target = ROOT / "output" / f"product_card_{job_id}_{audit_uuid().hex[:8]}.png"
++                                try:
++                                    output_path = await render_exact_product_card(
++                                        tmp_input, target, job_brand, job_model, job_specs)
++                                except Exception as error:
++                                    raise PhotoAuditHold("Не удалось собрать карточку с исходным фото") from error
++                            else:
++                                output_path = await process_one_file(
++                                    tmp_input, mode=job_mode, specs=job_specs,
++                                    brand=job_brand, model=job_model,
++                                    cdp_url=CDP_URL,
++                                    project_url=(LANE.project_url_for(job_mode)
++                                                 if LANE else None) or None,
++                                )
 +                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
 +                                async def regenerate_with_audit(notes):
-+                                    return await process_one_file(
-+                                        tmp_input, mode=job_mode,
-+                                        specs=(job_specs or "") + "\n\n" + notes,
-+                                        brand=job_brand, model=job_model, cdp_url=CDP_URL,
-+                                        project_url=(LANE.project_url_for(job_mode) if LANE else None) or None)
++                                    # The audit identified a product distortion. Preserve the real asset.
++                                    target = ROOT / "output" / f"audit_repair_{job_id}_{audit_uuid().hex[:8]}.png"
++                                    try:
++                                        return await render_exact_product_card(
++                                            verified_reference_asset(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model) or tmp_input,
++                                            target, job_brand, job_model, job_specs)
++                                    except Exception as error:
++                                        raise PhotoAuditHold("Не удалось собрать карточку с исходным фото") from error
 +                                output_path = await checked_output(
 +                                    AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model,
-+                                    output_path, tmp_input, regenerate_with_audit)
++                                    output_path, tmp_input, regenerate_with_audit,
++                                    start_revision=restored_audit["revision"] if restored_audit else 0,
++                                    repair_reference=True)
                              log.info("Обработано → %s", output_path)
                              # Сначала фиксируем готовое на диске, затем любые
                              # сетевые операции: рестарт не теряет результат.
-@@ -470,6 +527,10 @@
+@@ -470,7 +572,13 @@
                              last_error = None
                              break  # успех
  
@@ -120,5 +179,17 @@
 +                            output_path = None
 +                            break
                          except UploadLimitError as e:
++                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
++                                audit_generation_rejected(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
                              # Ретраить бессмысленно и вредно: квота меньше всего
                              # восстановится, если долбить её ретраями (2026-07-03).
+                             # Кулдаун + мягкий возврат задачи в очередь (Phase 4):
+@@ -487,6 +595,8 @@
+                             break
+ 
+                         except GenerationRateLimitError as e:
++                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
++                                audit_generation_rejected(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
+                             # «Слишком много запросов» — короткое остывание вместо
+                             # ретраев (они и сжигают квоту), задача мягко в очередь
+                             last_error = e

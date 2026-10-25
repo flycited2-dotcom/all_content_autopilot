@@ -3,6 +3,8 @@ import base64
 import hmac
 import json
 import logging
+import os
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -86,7 +88,9 @@ def process_one(store, auditor, audit_id=None):
             store.finish(row, auditor.run(row["product"], path))
     except ProviderError as exc:
         log.warning("Проверка ожидает провайдера: %s", exc.kind)
-        store.defer(row, "Проверка не завершена: провайдер недоступен (" + exc.kind + ").", retry_at=exc.retry_at)
+        delay = 3600 if exc.kind == 'usage_limit' else 300
+        store.defer(row, "Проверка не завершена: провайдер недоступен (" + exc.kind + ").",
+                    retry_at=exc.retry_at or time.time() + delay, provider_wait=True)
     except Exception as exc:
         log.warning("Проверка не завершена: %s", type(exc).__name__)
         store.defer(row, "Проверка источников/изображений не завершена: " + type(exc).__name__)
@@ -100,6 +104,10 @@ def worker_loop(store, auditor, stop):
 
 
 def notify(store, tg, owner):
+    for row in store.waiting_notifications():
+        tg.send(owner, f"⏳ {row['product']['brand']} {row['product']['model']}: фото сохранено. "
+                       "Проверка ожидает доступности ChatGPT и продолжится автоматически. Новая генерация не запускается.")
+        store.notified(row['id'])
     for row in store.pending_notifications():
         if row['product_id'].startswith('fotogen-') and row['status'] == 'regenerate':
             # The generator receives this feedback over the API. Do not flood the
@@ -124,6 +132,33 @@ def notify(store, tg, owner):
         for n, part in enumerate(chunks):
             tg.send(owner, part, keyboard if n == len(chunks) - 1 else None)
         store.notified(row["id"])
+
+
+def recover_pipeline(store, deliver=None):
+    """Only the latest decision can resume a failed card; the server deduplicates it."""
+    if deliver is None:
+        token = os.environ.get('ORCH_API_TOKEN')
+        if not token:
+            return
+        import httpx
+        from listener.client import ApiClient
+        with httpx.Client(timeout=20, trust_env=False) as http:
+            api = ApiClient(os.environ.get('ORCH_API_URL', 'http://127.0.0.1:8790'), token, http=http)
+            return recover_pipeline(store, lambda payload: api._post('/photo-audit-result', payload))
+    for row in store.recovery_results():
+        match = re.fullmatch(r'fotogen-([1-9][0-9]*)', row['product_id'])
+        if not match:
+            continue
+        payload = {'job_id': int(match[1]), 'audit_id': row['id'], 'attempt': row['attempt'],
+                   'revision': row['revision'], 'status': row['status'], 'sha256': row['sha256'],
+                   'brand': row['product']['brand'], 'model': row['product']['model']}
+        try:
+            result = deliver(payload)
+            if result.get('handled'):
+                store.recovery_delivered(row['id'], row['attempt'], result)
+        except Exception as exc:
+            log.warning('Доставка решения в конвейер отложена: %s', type(exc).__name__)
+            break
 
 
 def handle_update(update, store, tg, owner):
@@ -176,6 +211,7 @@ def handle_update(update, store, tg, owner):
 def run_bot(store, tg, owner, stop):
     while not stop.is_set():
         try:
+            recover_pipeline(store)
             notify(store, tg, owner)
             for update in tg.get_updates(store.offset(), timeout=20):
                 handle_update(update, store, tg, owner)

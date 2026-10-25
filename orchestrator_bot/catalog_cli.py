@@ -68,7 +68,8 @@ def enqueue(cf, args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue'))
+    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'resume-photo'))
+    parser.add_argument('--audit-json')
     for name in ('state-db', 'prices-dir', 'queue-db', 'category', 'source', 'quotas', 'btu',
                  'keys-json', 'due'):
         parser.add_argument('--' + name)
@@ -78,10 +79,15 @@ def main(argv=None):
     for flag in ('inverter', 'heat-pump', 'full-dc', 'no-wake'):
         parser.add_argument('--' + flag, action='store_true')
     args = parser.parse_args(argv)
-    if args.command != 'hint' and not args.category:
+    if args.command not in ('hint', 'resume-photo') and not args.category:
         parser.error('--category is required')
     from content_factory import agent_cli as cf
-    result = {'hint': hint, 'resolve': resolve, 'enqueue': enqueue}[args.command](cf, args)
+    if args.command == 'resume-photo':
+        from orchestrator_bot.photo_recovery import reconcile
+        state, _, queue = cf._paths(args)
+        result = reconcile(state, queue, json.loads(args.audit_json or '{}'))
+    else:
+        result = {'hint': hint, 'resolve': resolve, 'enqueue': enqueue}[args.command](cf, args)
     print(json.dumps(result, ensure_ascii=False))
 
 

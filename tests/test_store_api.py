@@ -99,6 +99,21 @@ def test_api_rejects_missing_token(server):
     assert exc.value.code == 401
 
 
+def test_photo_recovery_requires_auth_and_validates_before_factory(server):
+    from tests.test_photo_recovery import event
+    _, factory, _, base = server
+    calls = []
+    factory.reconcile_photo = lambda payload: calls.append(payload) or {'handled': True}
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _call(base, 'POST', '/photo-audit-result', event(), token=None)
+    assert exc.value.code == 401
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _call(base, 'POST', '/photo-audit-result', {**event(), 'status': 'publish'})
+    assert exc.value.code == 400 and not calls
+    assert _call(base, 'POST', '/photo-audit-result', event()) == {'handled': True}
+    assert calls == [event()]
+
+
 def test_health_check_never_claims_or_executes_a_waiting_message(server):
     store, factory, sent, base = server
     store.add_message(998, 'text', 'поставь холодильники')

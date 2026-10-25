@@ -25,7 +25,7 @@ class Factory:
         self._hint: tuple[float, dict] | None = None
 
     def _run(self, *args) -> dict:
-        catalog = args[0] in ('hint', 'resolve', 'enqueue')
+        catalog = args[0] in ('hint', 'resolve', 'enqueue', 'resume-photo')
         module = 'orchestrator_bot.catalog_cli' if catalog else 'content_factory.agent_cli'
         cmd = [self.cf_python, "-m", module, *args]
         # content-factory не установлен пакетом: его юниты задают PYTHONPATH=<root>/src — делаем так же
@@ -75,6 +75,9 @@ class Factory:
         # Время из слов владельца — время ВЫХОДА партии (владелец, 2026-10-21), а не старта генерации:
         # карточки делаются сразу, партия публикуется в названное время (feed.publish_at).
         return self._run("enqueue", *self._select_args(action))
+
+    def reconcile_photo(self, decision):
+        return self._run('resume-photo', '--audit-json', json.dumps(decision, ensure_ascii=False))
 
     def cancel(self, keys: list[str]) -> dict:
         return self._run("cancel", "--keys", ",".join(keys))

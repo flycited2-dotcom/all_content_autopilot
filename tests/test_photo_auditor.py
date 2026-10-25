@@ -206,6 +206,7 @@ def test_only_owner_can_submit_photos(tmp_path):
 
 def test_local_hook_retries_with_feedback_and_releases_only_matching_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(integration, "load", lambda root: {"api_token": "test"})
+    monkeypatch.setattr(integration, '_current_approval', lambda *args: True)
     path = tmp_path / "generated.png"
     path.write_bytes(picture())
     calls, prompts = [], []
@@ -230,6 +231,36 @@ def test_local_hook_retries_with_feedback_and_releases_only_matching_snapshot(mo
     path.write_bytes(picture("blue"))
     with pytest.raises(integration.AuditHold):
         integration.require_permit(tmp_path, "job1", path)
+
+
+def test_regeneration_does_not_restart_overall_audit_time_budget(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    now = [0]
+    monkeypatch.setattr(integration, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(integration, 'load', lambda root: {'api_token': 'test'})
+    path = tmp_path / 'generated.png'
+    path.write_bytes(picture())
+    submitted = []
+    def handle(request):
+        value = json.loads(request.content)
+        submitted.append(value)
+        now[0] = 4
+        return httpx.Response(200, json={'id': 'a', 'product': value['product'],
+            'sha256': digest(base64.b64decode(value['generated'])),
+            'status': 'regenerate', 'feedback': 'Correct the display'})
+    async def regenerate(notes):
+        now[0] = 11
+        path.write_bytes(picture('black'))
+        return path
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            with pytest.raises(integration.AuditHold, match='общий срок'):
+                await integration.checked_output(tmp_path, 'job1', 'Midea', 'ABC-12-RU',
+                                                  path, None, regenerate, timeout=10, client=client)
+    asyncio.run(run())
+    assert len(submitted) == 1
+    with pytest.raises(integration.AuditHold):
+        integration.require_permit(tmp_path, 'job1', path)
 
 
 def test_weak_reference_from_related_product_cannot_approve():

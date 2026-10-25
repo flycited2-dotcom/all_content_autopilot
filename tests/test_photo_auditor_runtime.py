@@ -73,7 +73,7 @@ def test_generator_patch_gates_research_card_and_both_replay_routes():
     spec.loader.exec_module(module)
     live = agent.read_text(encoding='utf-8')
     source = live
-    if 'PHOTO_AUDIT_BRIDGE_V2' in live:
+    if 'PHOTO_AUDIT_BRIDGE_V' in live:
         with pytest.raises(ValueError, match='уже присутствует'):
             module.patched(live)
         backup = root / 'runs/2026-10-23/autopilot/photo-agent-backup/remote_agent.py'
@@ -81,13 +81,15 @@ def test_generator_patch_gates_research_card_and_both_replay_routes():
             pytest.skip('Installed external bridge has no original source in this checkout')
         source = backup.read_text(encoding='utf-8')
     patched = module.patched(source)
-    if 'PHOTO_AUDIT_BRIDGE_V2' in live:
+    if 'PHOTO_AUDIT_BRIDGE_V5' in live:
         import ast
         assert ast.dump(ast.parse(live)) == ast.dump(ast.parse(patched))
     compile(patched, 'remote_agent.py', 'exec')
     assert patched.count('await checked_output(') == 2
     assert patched.count('guard_upload(AUDIT_ROOT, job_id, output_path)') == 2
-    assert patched.count('register_job(AUDIT_ROOT, job_id, job_mode') == 2
-    assert patched.count('except PhotoAuditHold as hold:') == 2
+    assert patched.count('register_job(AUDIT_ROOT, job_id, job_mode') == 3
+    assert patched.count('except PhotoAuditHold as hold:') == 3
+    assert 'restore_audit_output(' in patched and 'render_exact_product_card(' in patched
+    assert 'Исходник %d восстановлен из снимка контроля' in patched
     with pytest.raises(ValueError, match='уже присутствует'):
         module.patched(patched)

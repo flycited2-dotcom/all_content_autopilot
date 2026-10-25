@@ -161,8 +161,29 @@ class Auditor:
         comparison = checked_comparison(result["text"], sources)
         comparison["dimensions_note"] = "Физические размеры без масштаба не измерены. Пропорции оцениваются только по видимому эталону."
         verdict, reason = decision(comparison, sources)
+        passes = [comparison]
+        if verdict == 'approved':
+            # Fresh judgement without seeing the first response, focused on invented parts.
+            instruction = COMPARE + '''\nЭто отдельный второй проход. Не доверяй общей похожести.
+Особенно проверь внутренность барабана, дисплей, количество/форму кнопок, ручки,
+дверные стыки, решётки и комплектующие. Ищи добавленные, исчезнувшие и выдуманные
+элементы. Различай изменение ракурса и изменение конструкции. Если деталь нельзя
+сопоставить уверенно, ставь not_verifiable. Предыдущий ответ тебе не передаётся.'''
+            second = checked_comparison(self.provider.inspect(instruction, content)['text'], sources)
+            passes.append(second)
+            second_verdict, second_reason = decision(second, sources)
+            if second_verdict != 'approved':
+                comparison, verdict = second, second_verdict
+                reason = 'Второй проход: ' + second_reason
+            else:
+                # Both passes must independently meet the confidence threshold.
+                confidences = {c['aspect']: c['confidence'] for c in second['checks']}
+                comparison = {**comparison, 'checks': [{**c, 'confidence': min(c['confidence'], confidences[c['aspect']])}
+                                                        for c in comparison['checks']]}
+        comparison['dimensions_note'] = 'Физические размеры без масштаба не измерены. Пропорции оцениваются только по видимому эталону.'
         comparison_sheet(paths, folder / "comparison.jpg")
-        return {**comparison, "verdict": verdict, "reason": reason, "sources": sources, "source_errors": failures}
+        return {**comparison, "verdict": verdict, "reason": reason, "sources": sources,
+                "source_errors": failures, 'comparison_passes': passes}
 
 
 def feedback(report):
