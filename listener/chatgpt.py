@@ -42,7 +42,7 @@ _CODE_KINDS = {
     "model_not_found": "configuration",
 }
 _MESSAGES = {
-    "usage_limit": "ChatGPT: достигнут лимит использования плана",
+    "usage_limit": "ChatGPT: программный запрос отклонён по ограничению использования",
     "network": "ChatGPT временно недоступен; запрос не завершён",
     "configuration": "ChatGPT: проверьте разрешения и настройки подключения",
     "auth": "ChatGPT: требуется проверить вход в аккаунт",
@@ -95,7 +95,11 @@ def _failure(status=0, body=None, retry_after=None, now=None, default="invalid_r
     else:
         kind = default
     retry = _retry_at(retry_after, time.time() if now is None else now)
-    return ProviderError("chatgpt", kind, _MESSAGES[kind] + (f" ({code})" if code else ""), retry_at=retry)
+    message = _MESSAGES[kind] + (f" ({code})" if code else "")
+    if code == 'subscription_sharing_usage_limit_exceeded':
+        message += ('. Это может быть ограничение приложения; общий остаток плана и время сброса '
+                    'не установлены. Настройки: https://chatgpt.com/settings/usage')
+    return ProviderError("chatgpt", kind, message, retry_at=retry, code=code)
 
 
 def _error_body(response: httpx.Response):

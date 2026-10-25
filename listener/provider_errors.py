@@ -3,10 +3,12 @@ from __future__ import annotations
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, provider: str, kind: str, message: str, retry_at: float | None = None):
+    def __init__(self, provider: str, kind: str, message: str, retry_at: float | None = None,
+                 *, code: str | None = None):
         self.provider = provider
         self.kind = kind
         self.retry_at = retry_at
+        self.code = code
         super().__init__(message)
 
 

@@ -102,6 +102,8 @@ class ModelRouter:
                                            "not_connected": not_connected}
         log.warning("Обработчик %s недоступен: %s; следующая проверка %s", name, error.kind,
                     datetime.fromtimestamp(retry, MOSCOW).isoformat())
+        if name == 'chatgpt':
+            log.warning('Причина отказа программного подключения: %s', error)
         self._save()
 
     def _payload(self, payload):

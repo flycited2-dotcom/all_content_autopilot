@@ -273,8 +273,21 @@ def test_known_errors_have_safe_exact_code(make_provider, code, status, expected
     with pytest.raises(ProviderError) as caught:
         provider.complete("intent", {})
     assert caught.value.kind == expected and caught.value.provider == "chatgpt"
+    assert caught.value.code == code
     assert code in str(caught.value) and "secret-token" not in str(caught.value)
     assert caught.value.retry_at is None
+
+
+def test_subscription_sharing_limit_does_not_claim_whole_chatgpt_plan_is_empty(make_provider):
+    provider, _ = make_provider(httpx.Response(429, json={
+        'error': {'code': 'subscription_sharing_usage_limit_exceeded'}}))
+    with pytest.raises(ProviderError) as caught:
+        provider.complete('intent', {})
+    message = str(caught.value)
+    assert 'ограничение приложения' in message
+    assert 'https://chatgpt.com/settings/usage' in message
+    assert 'время сброса не установлены' in message
+    assert 'лимит использования плана' not in message
 
 
 @pytest.mark.parametrize("status,expected", [(401, "auth"), (403, "configuration"), (503, "network"), (429, "rate_limit")])

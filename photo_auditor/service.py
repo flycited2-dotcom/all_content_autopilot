@@ -87,7 +87,7 @@ def process_one(store, auditor, audit_id=None):
         else:
             store.finish(row, auditor.run(row["product"], path))
     except ProviderError as exc:
-        log.warning("Проверка ожидает провайдера: %s", exc.kind)
+        log.warning("Проверка ожидает провайдера: %s; %s", exc.kind, exc)
         delay = 3600 if exc.kind == 'usage_limit' else 300
         store.defer(row, "Проверка не завершена: провайдер недоступен (" + exc.kind + ").",
                     retry_at=exc.retry_at or time.time() + delay, provider_wait=True)
