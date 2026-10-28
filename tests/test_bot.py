@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 import httpx
 import pytest
@@ -428,8 +429,100 @@ def test_batch_without_ready_cards_reports_once_and_never_publishes(deps):
     feed.tick(deps, NOW)
     feed.tick(deps, NOW + feed.POLL_EVERY + 1)
     notices = [text for text in deps.tg.texts() if 'без готовых превью' in text]
-    assert len(notices) == 1 and 'удержаний: 2' in notices[0]
+    assert len(notices) == 1 and 'Остальные карточки: 2' in notices[0]
     assert deps.store.get_batch(log_id)['status'] == 'failed'
+    assert not deps.factory.calls
+
+
+def test_partial_batch_returns_for_review_after_audit_recovery_without_auto_publish(deps):
+    from orchestrator_bot import feed
+    deps.factory = FeedFactory()
+    log_id = _batch(deps)
+    deps.store.set_meta('digest_day', datetime.fromtimestamp(NOW).date().isoformat())
+    partial = {'total': 2, 'ready': 1, 'in_work': 0, 'published': 0, 'dropped': 1}
+    deps.factory.status_by_call = [partial,
+        {'total': 2, 'ready': 1, 'in_work': 1, 'published': 0, 'dropped': 0},
+        {'total': 2, 'ready': 2, 'in_work': 0, 'published': 0, 'dropped': 0}]
+    feed.tick(deps, NOW)
+    assert any('1 из 2 карточек' in text and 'Остальные карточки: 1' in text for text in deps.tg.texts())
+    assert deps.store.get_batch(log_id)['status'] == 'ready'
+    deps.store.reopen_recovered_batches('k2', recovery_id='audit:0')
+    feed.tick(deps, NOW + feed.POLL_EVERY + 1)
+    assert deps.store.get_batch(log_id)['status'] == 'open'
+    assert not deps.factory.calls
+    feed.tick(deps, NOW + 2 * feed.POLL_EVERY + 2)
+    assert deps.store.get_batch(log_id)['status'] == 'ready'
+    assert len([text for text in deps.tg.texts() if 'Партия «холодильники» готова: 2' in text]) == 1
+    assert not deps.factory.calls
+    assert deps.store.reopen_recovered_batches('k2', recovery_id='audit:0') == 0
+    feed.tick(deps, NOW + 3 * feed.POLL_EVERY + 3)
+    assert len([text for text in deps.tg.texts() if 'Партия «холодильники» готова: 2' in text]) == 1
+
+
+@pytest.mark.parametrize('ready', [0, 1])
+def test_stale_batch_poll_does_not_report_a_recovered_job_as_finished(deps, ready):
+    from orchestrator_bot import feed
+    deps.factory = FeedFactory()
+    log_id = _batch(deps)
+    deps.store.set_meta('digest_day', datetime.fromtimestamp(NOW).date().isoformat())
+
+    def stale_status(keys):
+        deps.store.reopen_recovered_batches('k2', recovery_id='audit:0')
+        return {'total': 2, 'ready': ready, 'in_work': 0, 'published': 0, 'dropped': 2 - ready}
+
+    deps.factory.batch_status = stale_status
+    feed.tick(deps, NOW)
+    assert deps.store.get_batch(log_id)['status'] == 'open'
+    assert not deps.tg.texts()
+    assert not deps.factory.calls
+
+
+def test_owner_can_cancel_reopened_batch_using_its_previous_review_button(deps):
+    from orchestrator_bot import feed
+    deps.factory = FeedFactory()
+    log_id = _batch(deps)
+    deps.store.move_batch(log_id, ('open',), 'ready')
+    deps.store.reopen_recovered_batches('k2', recovery_id='audit:0')
+    feed.batch_action(deps, OWNER, 'p', log_id)
+    assert not deps.factory.calls
+    feed.batch_action(deps, OWNER, 'x', log_id)
+    assert deps.store.get_batch(log_id)['status'] == 'closed'
+    assert deps.store.reopen_recovered_batches('k2', recovery_id='audit:1') == 0
+
+
+@pytest.mark.parametrize('ready,published,dropped', [(1, 1, 4), (0, 1, 5), (5, 1, 0)])
+def test_batch_notice_accounts_for_published_cards_without_calling_every_other_item_an_error(
+        deps, ready, published, dropped):
+    from orchestrator_bot import feed
+    deps.factory = FeedFactory()
+    log_id = _batch(deps)
+    deps.store.set_meta('digest_day', datetime.fromtimestamp(NOW).date().isoformat())
+    deps.factory.status_by_call = [{'total': 6, 'ready': ready, 'in_work': 0,
+                                    'published': published, 'dropped': dropped}]
+    feed.tick(deps, NOW)
+    feed.tick(deps, NOW + feed.POLL_EVERY + 1)
+    assert len(deps.tg.texts()) == 1
+    text = deps.tg.texts()[0]
+    assert f'{ready} из 6 карточек' in text
+    assert f'Уже опубликовано: {published}' in text
+    assert f'Остальные карточки: {dropped}' in text
+    # dropped also includes expired, rejected and cancelled items.
+    assert 'Ошибок или удержаний:' not in text
+    assert deps.store.get_batch(log_id)['status'] == ('ready' if ready else 'failed')
+    assert not deps.factory.calls
+
+
+def test_batch_with_all_cards_already_published_is_not_reported_failed_or_published_again(deps):
+    from orchestrator_bot import feed
+    deps.factory = FeedFactory()
+    log_id = _batch(deps)
+    deps.store.set_meta('digest_day', datetime.fromtimestamp(NOW).date().isoformat())
+    deps.factory.status_by_call = [{'total': 2, 'ready': 0, 'in_work': 0, 'published': 2, 'dropped': 0}]
+    feed.tick(deps, NOW)
+    feed.tick(deps, NOW + feed.POLL_EVERY + 1)
+    assert len(deps.tg.texts()) == 1
+    assert 'уже опубликована: 2 из 2 карточек' in deps.tg.texts()[0]
+    assert deps.store.get_batch(log_id)['status'] == 'published'
     assert not deps.factory.calls
 
 

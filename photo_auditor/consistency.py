@@ -3,10 +3,16 @@ import json
 from photo_auditor.evidence import eligible, covers
 
 
+def primary_sources(report):
+    assessments = {c['id']: c for c in report.get('source_checks', [])}
+    return [{**s, 'main_product_visible': assessments[n]['main_product_visible']}
+            if n in assessments else s for n, s in enumerate(report.get('sources', []), 1)]
+
+
 def preserve_defects(report, previous):
     if report['verdict'] != 'approved':
         return report
-    current_sources = report.get('sources', [])
+    current_sources = primary_sources(report)
     current_ids, current_basis = eligible(current_sources, report.get('manufacturer_unavailable', False))
     current = {s.get('image_sha256'): n for n, s in enumerate(current_sources, 1)
                if n in current_ids and s.get('image_sha256')}
@@ -15,7 +21,7 @@ def preserve_defects(report, previous):
         old = json.loads(old) if isinstance(old, str) else old
         if not old:
             continue
-        sources = old.get('sources', [])
+        sources = primary_sources(old)
         old_ids, old_basis = eligible(sources, old.get('manufacturer_unavailable', False))
         for check in old.get('checks', []):
             if (check.get('status') != 'mismatch' or check.get('confidence', 0) < (.9 if old_basis == 'official' else .95) or

@@ -1,5 +1,6 @@
 """Durable queue with immutable snapshots, leases and bounded revisions."""
 import json
+import math
 import re
 import shutil
 import sqlite3
@@ -12,6 +13,26 @@ from listener.pending import write_json
 from photo_auditor.images import digest, image_bytes
 
 MAX_REGENERATIONS = 2
+PROVIDER_ERROR_KINDS = frozenset({'usage_limit', 'network', 'rate_limit', 'auth',
+                                  'configuration', 'invalid_response'})
+PROVIDER_ERROR_CODES = frozenset({
+    'subscription_sharing_usage_limit_exceeded', 'subscription_sharing_usage_unavailable',
+    'subscription_sharing_user_unavailable', 'subscription_sharing_user_not_eligible',
+    'subscription_sharing_unsupported_capability', 'subscription_sharing_route_not_supported',
+    'subscription_sharing_invalid_user', 'chatpass_v2_scope_not_authorized',
+    'chatpass_v2_invalid_authorization_context', 'insufficient_quota', 'quota_exceeded',
+    'rate_limit_exceeded', 'invalid_api_key', 'invalid_authentication', 'model_not_found',
+})
+
+
+def sanitize_provider_error(value):
+    """Persist only known categories; provider responses and messages never enter the queue."""
+    if (not isinstance(value, dict) or value.get('provider') != 'chatgpt' or
+            not isinstance(value.get('kind'), str) or value['kind'] not in PROVIDER_ERROR_KINDS):
+        return None
+    code = value.get('code')
+    return {'provider': 'chatgpt', 'kind': value['kind'],
+            'code': code if isinstance(code, str) and code in PROVIDER_ERROR_CODES else None}
 
 
 class AuditStore:
@@ -20,11 +41,14 @@ class AuditStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "audit.sqlite3"
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute("""CREATE TABLE IF NOT EXISTS audits (
                 id TEXT PRIMARY KEY, product_id TEXT, revision INTEGER, product TEXT, sha256 TEXT,
                 status TEXT, report TEXT, created REAL, lease REAL, tries INTEGER DEFAULT 0,
-                retry_at REAL DEFAULT 0, notified INTEGER DEFAULT 0,
+                retry_at REAL DEFAULT 0, notified INTEGER DEFAULT 0, provider_error TEXT,
                 UNIQUE(product_id, revision))""")
+            if 'provider_error' not in {row[1] for row in db.execute('PRAGMA table_info(audits)')}:
+                db.execute('ALTER TABLE audits ADD COLUMN provider_error TEXT')
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT)")
             db.execute('CREATE TABLE IF NOT EXISTS human_feedback ('
                        'audit_id TEXT PRIMARY KEY, verdict TEXT NOT NULL, created REAL NOT NULL)')
@@ -86,7 +110,14 @@ class AuditStore:
 
     @staticmethod
     def _row(row):
-        return {**dict(row), "product": json.loads(row["product"]), "report": json.loads(row["report"]) if row["report"] else None}
+        value = dict(row)
+        try:
+            provider_error = sanitize_provider_error(json.loads(value['provider_error'])) if value.get('provider_error') else None
+        except (ValueError, TypeError):
+            provider_error = None
+        return {**value, "product": json.loads(row["product"]),
+                "report": json.loads(row["report"]) if row["report"] else None,
+                'provider_error': provider_error}
 
     def get(self, audit_id):
         with self.connect() as db:
@@ -99,12 +130,14 @@ class AuditStore:
                              (product_id,)).fetchone()
         return self._row(row) if row else None
 
-    def recheck(self, audit_id):
-        """Explicit retry of the same snapshot. Keep prior evidence and paid revision count."""
+    def recheck(self, audit_id, *, content_only=False):
+        """Retry the same snapshot; content-only retry requires intact signed visual evidence."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM audits WHERE id=?', (audit_id,)).fetchone()
             if not row or row['status'] not in ('review', 'approved'):
+                return False
+            if content_only and row['status'] != 'review':
                 return False
             if db.execute('SELECT 1 FROM audits WHERE product_id=? AND revision>?',
                           (row['product_id'], row['revision'])).fetchone():
@@ -112,23 +145,52 @@ class AuditStore:
             folder = self.root / audit_id
             if digest((folder / 'generated.bin').read_bytes()) != row['sha256']:
                 raise ValueError('Сохранённый снимок изменился')
+            if content_only:
+                from photo_auditor import audit_checkpoint
+                from photo_auditor.integration import AuditHold
+                from photo_auditor.runtime import content_brief
+                root = self.root.parent.parent
+                try:
+                    product = json.loads(row['product'])
+                    brief = content_brief(root, product)
+                    if brief is None or audit_checkpoint.load(root, product, folder, brief) is None:
+                        return False
+                except (AuditHold, OSError, ValueError, TypeError, KeyError):
+                    return False
             attempt = db.execute('SELECT count(*) FROM audit_history WHERE audit_id=?', (audit_id,)).fetchone()[0]
             archive = folder / 'history' / uuid.uuid4().hex
             archive.mkdir(parents=True)
             for file in folder.iterdir():
-                if file.is_file() and (file.name.startswith('source-') or file.name in ('report.json', 'comparison.jpg')):
+                if file.is_file() and (file.name.startswith('source-') or file.name in ('report.json', 'comparison.jpg', 'visual-checkpoint.json', 'content-validation.json')):
                     shutil.copy2(file, archive / file.name)
+            # Full recheck seeks fresh evidence; a content-only retry retains its signed visual result.
+            if not content_only:
+                (folder / 'visual-checkpoint.json').unlink(missing_ok=True)
             db.execute('INSERT INTO audit_history VALUES(?,?,?,?,?)',
                        (audit_id, attempt, row['report'], str(archive), time.time()))
-            db.execute("UPDATE audits SET status='queued',report=NULL,tries=0,retry_at=0,notified=0,lease=NULL WHERE id=?",
+            db.execute("UPDATE audits SET status='queued',report=NULL,tries=0,retry_at=0,notified=0,lease=NULL,provider_error=NULL WHERE id=?",
+                       (audit_id,))
+        return True
+
+    def retry_waiting(self, audit_id):
+        """Retry only the latest saved provider wait, without creating a revision or image."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM audits WHERE id=?', (audit_id,)).fetchone()
+            if not row or row['status'] != 'waiting_provider':
+                return False
+            if db.execute('SELECT 1 FROM audits WHERE product_id=? AND revision>?',
+                          (row['product_id'], row['revision'])).fetchone():
+                return False
+            source = self.root / audit_id / 'generated.bin'
+            if digest(image_bytes(source.read_bytes())) != row['sha256']:
+                raise ValueError('Сохранённый снимок изменился')
+            db.execute("UPDATE audits SET status='queued',retry_at=0,notified=0,lease=NULL,provider_error=NULL WHERE id=?",
                        (audit_id,))
         return True
 
     def request_reference_repair(self, audit_id):
-        """A native card can replace an uncertain supplier photo with the verified asset.
-
-        This authorizes a new composition, never an upload or an AI redraw.
-        """
+        """Explicit source-only recovery; an inconclusive card cannot buy a redraw."""
         from photo_auditor.reference_asset import from_audit
         from photo_auditor.runtime import _read
         row = self.get(audit_id)
@@ -141,14 +203,14 @@ class AuditStore:
         scope = _read(root, int(match[1]))
         from photo_auditor.progress import research_specs
         research = scope.get('mode') == 'research' and bool(research_specs(root, row['product_id'], row['product']['brand'], row['product']['model']))
-        if ((scope.get('mode') not in {'kbt', 'mcp', 'conditioner', 'ready_light', 'ready_tv'} and not research) or
+        if (not research or
                 not scope.get('required') or
                 (scope.get('brand'), scope.get('model')) != (row['product']['brand'], row['product']['model']) or
                 from_audit(root, row) is None):
             return False
         report = {**row['report'], 'verdict': 'regenerate', 'repair_mode': 'reference_asset',
-                  'reason': 'Нужно собрать карточку с проверенным официальным фото вместо неподтверждённых деталей исходника. '
-                            'Это новая компоновка без перерисовки товара; результат проверяется заново.'}
+                  'reason': 'Нужно заменить исходник на визуально проверенное фото основного товара. '
+                            'Новая генерация не разрешена; скачанный снимок проверяется заново.'}
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             changed = db.execute("UPDATE audits SET status='regenerate',report=?,notified=0 WHERE id=? AND status='review' AND report=?",
@@ -169,7 +231,11 @@ class AuditStore:
             if audit_id is not None:
                 query += " AND id=?"
                 params.append(audit_id)
-            row = db.execute(query + " ORDER BY created LIMIT 1", params).fetchone()
+            # Live agents poll for an output they are holding; do not put them
+            # behind a large historical recheck campaign.
+            row = db.execute(query + " ORDER BY CASE WHEN EXISTS(SELECT 1 FROM meta m WHERE "
+                             "m.key='consumer:'||audits.id AND CAST(m.value AS REAL)>=?) THEN 0 ELSE 1 END,created LIMIT 1",
+                             [*params, now - 90]).fetchone()
             if row:
                 lease = uuid.uuid4().hex
                 # generation token prevents a late worker overwriting a recovered lease
@@ -181,7 +247,24 @@ class AuditStore:
         result["lease_token"] = lease
         return result
 
+    def consumer_waiting(self, audit_id, now=None):
+        with self.connect() as db:
+            if db.execute('SELECT 1 FROM audits WHERE id=?', (audit_id,)).fetchone():
+                db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',
+                           ('consumer:' + audit_id, str(time.time() if now is None else now)))
+
+    def renew_lease(self, audit, now=None):
+        with self.connect() as db:
+            return bool(db.execute("UPDATE audits SET lease=? WHERE id=? AND status='checking' AND "
+                "EXISTS(SELECT 1 FROM meta WHERE key=? AND value=?)",
+                (time.time() if now is None else now, audit['id'], 'lease:' + audit['id'], audit['lease_token'])).rowcount)
+
     def _consistent_report(self, audit, report):
+        if report.get('owner_approval'):
+            from photo_auditor.owner_decisions import valid
+            if valid(self.root.parent.parent,audit['product'],report):
+                return report
+            return {**report,'verdict':'review','reason':'Подтверждение владельца не соответствует файлу или заданию.'}
         from photo_auditor.consistency import preserve_defects
         # Same image, exact nomenclature, same official reference: keep concrete defects.
         with self.connect() as db:
@@ -237,25 +320,39 @@ class AuditStore:
             if not lease or lease[0] != audit["lease_token"] or not current or current[0] != 'checking':
                 return False
             write_json(self.root / audit["id"] / "report.json", report)
-            db.execute("UPDATE audits SET status=?,report=?,notified=0 WHERE id=? AND status='checking'",
+            db.execute("UPDATE audits SET status=?,report=?,notified=0,provider_error=NULL WHERE id=? AND status='checking'",
                        (report["verdict"], json.dumps(report, ensure_ascii=False), audit["id"]))
         return True
 
-    def defer(self, audit, reason, now=None, retry_at=None, provider_wait=False):
+    def defer(self, audit, reason, now=None, retry_at=None, provider_wait=False, provider_error=None):
         now = time.time() if now is None else now
         if audit["tries"] >= 3 and not provider_wait:
             return self.finish(audit, {"verdict": "review", "reason": reason,
                 "checks": [], "sources": [], "dimensions_note": "Проверка не завершена."})
+        diagnostic = sanitize_provider_error(provider_error) if provider_wait else None
+        valid_retry = type(retry_at) in (int, float) and math.isfinite(retry_at)
+        retry_at = max(now + 60, retry_at if valid_retry else now + 300)
         with self.connect() as db:
-            db.execute("UPDATE audits SET status=?,retry_at=? WHERE id=? AND status='checking' AND "
+            db.execute("UPDATE audits SET status=?,retry_at=?,provider_error=? WHERE id=? AND status='checking' AND "
                        "EXISTS(SELECT 1 FROM meta WHERE key=? AND value=?)",
-                       ('waiting_provider' if provider_wait else 'queued', max(now + 60, retry_at or now + 300),
+                       ('waiting_provider' if provider_wait else 'queued', retry_at,
+                        json.dumps(diagnostic) if diagnostic else None,
                         audit["id"], "lease:" + audit["id"], audit["lease_token"]))
 
     def waiting_notifications(self):
         with self.connect() as db:
             return [self._row(row) for row in db.execute(
                 "SELECT * FROM audits WHERE status='waiting_provider' AND notified=0 LIMIT 10")]
+
+    def waiting(self, limit=10):
+        """Current provider waits for status output, including already notified snapshots."""
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError('Неверный предел ожидающих проверок')
+        with self.connect() as db:
+            rows = db.execute("SELECT a.* FROM audits a WHERE a.status='waiting_provider' "
+                'AND NOT EXISTS(SELECT 1 FROM audits newer WHERE newer.product_id=a.product_id '
+                'AND newer.revision>a.revision) ORDER BY a.created LIMIT ?', (limit,)).fetchall()
+        return [self._row(row) for row in rows]
 
     def recovery_results(self):
         with self.connect() as db:
@@ -294,6 +391,68 @@ class AuditStore:
                        'DO UPDATE SET verdict=excluded.verdict,created=excluded.created',
                        (audit_id, verdict, time.time()))
         return True
+
+    def owner_approve(self, audit_id, actor_id, callback_id, *, publish=False):
+        """Owner acceptance is separate from the preserved automatic judgement."""
+        from photo_auditor import runtime, owner_decisions
+        root=self.root.parent.parent
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            raw=db.execute('SELECT * FROM audits WHERE id=?',(audit_id,)).fetchone()
+            if not raw:
+                raise ValueError('Проверка не найдена')
+            row=self._row(raw)
+            if db.execute('SELECT 1 FROM audits WHERE product_id=? AND revision>?',
+                          (row['product_id'],row['revision'])).fetchone():
+                raise ValueError('Это старая фотография. Откройте последнюю ревизию в аудиторе.')
+            if row['status'] not in ('review','regenerate','approved') or not row['report']:
+                raise ValueError('Эта фотография ещё проверяется. Дождитесь отчёта.')
+            folder=self.root/audit_id
+            if digest(image_bytes((folder/'generated.bin').read_bytes()))!=row['sha256']:
+                raise ValueError('Фотография изменилась; подтверждение остановлено.')
+            brief=runtime.content_brief(root,row['product'])
+            if type(publish) is not bool or publish and brief is None:
+                raise ValueError('Публиковать можно готовую карточку, а не исходное фото этапа поиска.')
+            already_requested=bool(row['report'].get('owner_approval',{}).get('payload',{}).get('publish_requested'))
+            if row['status']=='approved' and runtime.approval_covers_brief(root,row['product'],row['report']) and (not publish or already_requested):
+                if publish:
+                    previous=db.execute('SELECT value FROM meta WHERE key=?',('owner-publish:'+audit_id,)).fetchone()
+                    prior=json.loads(previous[0]) if previous else {}
+                    if prior.get('status')!='pending' and not prior.get('result',{}).get('published'):
+                        db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',
+                                   ('owner-publish:'+audit_id,json.dumps({'audit_id':audit_id,'status':'pending'})))
+                return {'approved':True,'already_approved':True,'product':row['product']}
+            signed=owner_decisions.sign(root,row,actor_id,callback_id,publish=publish)
+            report={**row['report'],'verdict':'approved','generated_sha256':row['sha256'],
+                    'product':row['product'],'owner_approval':signed,
+                    'reason':'Владелец подтвердил сохранённый результат. Автоматическое заключение сохранено в истории.'}
+            if brief is not None:
+                report['content_review']={'verdict':'approved','policy_version':runtime.CONTENT_POLICY,
+                    'brief_sha256':runtime.brief_digest(brief),'reviewer':'owner',
+                    'reason':'Карточка принята владельцем.',
+                    'automatic_review':row['report'].get('content_review')}
+            attempt=db.execute('SELECT count(*) FROM audit_history WHERE audit_id=?',(audit_id,)).fetchone()[0]
+            archive=folder/'history'/uuid.uuid4().hex;archive.mkdir(parents=True)
+            write_json(archive/'report.json',row['report'])
+            db.execute('INSERT INTO audit_history VALUES(?,?,?,?,?)',
+                       (audit_id,attempt,raw['report'],str(archive),time.time()))
+            write_json(folder/'report.json',report)
+            db.execute("UPDATE audits SET status='approved',report=?,lease=NULL,retry_at=0,provider_error=NULL,notified=1 WHERE id=?",
+                       (json.dumps(report,ensure_ascii=False),audit_id))
+            if publish:
+                db.execute('INSERT OR IGNORE INTO meta VALUES(?,?)',
+                           ('owner-publish:'+audit_id,json.dumps({'audit_id':audit_id,'status':'pending'})))
+        return {'approved':True,'already_approved':False,'product':row['product']}
+
+    def pending_publications(self):
+        with self.connect() as db:
+            rows=db.execute("SELECT value FROM meta WHERE key LIKE 'owner-publish:%'").fetchall()
+        return [value for row in rows if (value:=json.loads(row[0])).get('status')=='pending']
+
+    def publication_finished(self, audit_id, result):
+        with self.connect() as db:
+            db.execute('UPDATE meta SET value=? WHERE key=?',
+                       (json.dumps({'audit_id':audit_id,'status':'done','result':result},ensure_ascii=False),'owner-publish:'+audit_id))
 
     def offset(self, value=None):
         with self.connect() as db:

@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import time
+import threading
 from pathlib import Path
 
 
@@ -23,9 +24,10 @@ class Factory:
         self.cf_python, self.cf_root, self.runner, self.timeout = cf_python, cf_root, runner, timeout
         self.clock = clock
         self._hint: tuple[float, dict] | None = None
+        self._publish_lock=threading.RLock()
 
     def _run(self, *args) -> dict:
-        catalog = args[0] in ('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'batch-status', 'publish-keys', 'cancel')
+        catalog = args[0] in ('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'publish-audited', 'batch-status', 'publish-keys', 'cancel')
         module = 'orchestrator_bot.catalog_cli' if catalog else 'content_factory.agent_cli'
         cmd = [self.cf_python, "-m", module, *args]
         # content-factory не установлен пакетом: его юниты задают PYTHONPATH=<root>/src — делаем так же
@@ -120,7 +122,12 @@ class Factory:
         return self._run('batch-status', '--keys-json', json.dumps(keys, ensure_ascii=False))
 
     def publish_keys(self, keys: list[str]) -> dict:
-        return self._run('publish-keys', '--keys-json', json.dumps(keys, ensure_ascii=False))
+        with self._publish_lock:
+            return self._run('publish-keys', '--keys-json', json.dumps(keys, ensure_ascii=False))
+
+    def publish_audited(self, decision) -> dict:
+        with self._publish_lock:
+            return self._run('publish-audited','--audit-json',json.dumps(decision,ensure_ascii=False))
 
     # ── этап 3: посты оркестратора ──
     def visual_submit(self, scene: str, request_key: str, new: bool = False) -> dict:

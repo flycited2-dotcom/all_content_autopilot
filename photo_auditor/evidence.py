@@ -1,18 +1,18 @@
-"""Manufacturer first; a documented fallback requires three independent catalogs."""
-from photo_auditor.discovery import owner
+"""Use exact-model evidence; source availability is not an arbitrary production quota."""
 
 
 def eligible(sources, manufacturer_unavailable=False):
-    official = {n for n, s in enumerate(sources, 1) if s.get('official') and s.get('model_image_verified')}
+    official = {n for n, s in enumerate(sources, 1) if s.get('official') and s.get('model_image_verified')
+                and s.get('main_product_visible') is not False}
     if official:
         return official, 'official'
-    verified = {n for n, s in enumerate(sources, 1) if s.get('model_image_verified')}
-    if manufacturer_unavailable and len({owner(sources[n-1]['url']) for n in verified}) >= 3:
-        return verified, 'secondary_consensus'
+    verified = {n for n, s in enumerate(sources, 1) if s.get('model_image_verified')
+                and s.get('main_product_visible') is not False}
+    if manufacturer_unavailable and verified:
+        return verified, 'catalog_reference'
     return set(), 'insufficient'
 
 
 def covers(ids, eligible_ids, sources, basis):
     used = set(ids).intersection(eligible_ids)
-    return (bool(used) if basis == 'official' else
-            len({owner(sources[n-1]['url']) for n in used}) >= 3)
+    return bool(used) if basis in {'official', 'catalog_reference'} else False

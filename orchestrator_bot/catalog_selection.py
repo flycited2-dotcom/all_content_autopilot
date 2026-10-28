@@ -17,6 +17,25 @@ def brand_key(value):
     return unicodedata.normalize('NFKC', str(value or '')).casefold().strip()
 
 
+def resolve_identity(row, known_brands):
+    """Recover an explicitly printed brand and single SKU, without guessing a manufacturer."""
+    if str(row.get('brand') or '').strip():
+        return row
+    title = unicodedata.normalize('NFKC', str(row.get('model') or row.get('name') or '')).strip()
+    matches = []
+    for brand in sorted({str(b).strip() for b in known_brands if str(b).strip()}, key=str.casefold):
+        match = re.search(r'(?<!\w)' + re.escape(brand) + r'(?!\w)', title, re.I)
+        if match:
+            matches.append((brand, match))
+    if len(matches) != 1:
+        return row
+    brand, match = matches[0]
+    model = model_name(title[match.end():].strip(' :—-'))
+    if not re.fullmatch(r'(?=.*[a-zа-яё])(?=.*\d)[a-zа-яё0-9][a-zа-яё0-9_./-]*', model, re.I):
+        return row
+    return {**row, 'brand': brand, 'model': model}
+
+
 def select_rows(rows, *, count=None, quotas=None, mode='auto', keys=None):
     if count is not None and (type(count) is not int or count < 1):
         raise ValueError('Количество должно быть положительным целым числом')

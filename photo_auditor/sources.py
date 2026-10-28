@@ -1,4 +1,4 @@
-"""Fetch only public, cited pages and reference images linked by those pages."""
+"""Fetch public exact-model pages and reference images bound to those pages."""
 import ipaddress
 import re
 import socket
@@ -24,9 +24,34 @@ def model_key(value):
     return re.sub(r"[^a-zа-яё0-9]", "", value.casefold())
 
 
+def source_model(model):
+    """Use an explicit TV SKU for source binding, preserving the display title.
+
+    Supplier titles may contain a series, year, resolution and OS in a different
+    order than the manufacturer's title. Only the two known Xiaomi TV SKU
+    families are extracted; other products keep the existing exact-title rule.
+    An ambiguous or extended SKU must not silently become its shorter variant.
+    """
+    value = model.casefold()
+    if not re.search(r"(?<![a-zа-яё0-9])(?:tv|телевизор|xiaomi)(?![a-zа-яё0-9])", value):
+        return model
+    codes = re.findall(
+        r"(?<![a-zа-яё0-9])l\d{2}m[a-z]{1,3}[-_/. ]+[a-z0-9]+(?:[-_/.][a-z0-9]+)*",
+        value,
+    )
+    if not codes:
+        return model
+    normalized = {re.sub(r"[-_/. ]+", "-", code) for code in codes}
+    if len(normalized) != 1:
+        return None
+    sku = next(iter(normalized))
+    return sku if re.fullmatch(r"l\d{2}(?:mb-apru|mc-sru)", sku) else None
+
+
 def contains_model(text, model):
     # Separators may differ; a longer model/suffix must never match a short SKU.
-    tokens = re.findall(r"[a-zа-яё0-9]+", model.casefold())
+    identity = source_model(model)
+    tokens = re.findall(r"[a-zа-яё0-9]+", identity.casefold()) if identity else []
     pattern = r"(?<![a-zа-яё0-9])" + r"[\W_]*".join(map(re.escape, tokens)) + r"(?![a-zа-яё0-9]|[-_/.][a-zа-яё0-9])"
     return bool(tokens and re.search(pattern, text.casefold()))
 
@@ -193,14 +218,8 @@ class PublicWeb:
 
     def reference(self, candidate, model, cited, domains):
         url = canonical(candidate["url"])
-        visited = set()
-        for value in cited:
-            try:
-                visited.add(canonical(value))
-            except (ValueError, TypeError):
-                pass
-        if url not in visited:
-            raise ValueError("Нет подтверждения посещения источника поиском")
+        # Search metadata is only discovery, not proof. Fetch and verify the
+        # actual public page ourselves, including exact model and photo binding.
         final, html = self.fetch(url, 3 * 1024 * 1024)
         page = Page()
         page.feed(html.decode("utf-8", errors="replace"))
@@ -236,7 +255,8 @@ class PublicWeb:
             image_url = canonical(urljoin(final, candidate['image_url']))
             if image_url not in linked | primary:
                 raise ValueError('Эталонное фото не связано со страницей товара')
-            candidates = [image_url, *sorted(primary - {image_url}, key=quality)]
+            candidates = ([image_url, *sorted(primary - {image_url}, key=quality)] if image_url in primary else
+                          sorted(primary, key=quality) if primary else [image_url])
         elif primary:
             # The page, not a guessed model URL, supplies the actual product image.
             candidates = sorted(primary, key=quality)

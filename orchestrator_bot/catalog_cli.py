@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import sqlite3
 
-from orchestrator_bot.catalog_selection import select_rows, model_name
+from orchestrator_bot.catalog_selection import select_rows, model_name, resolve_identity
 
 
 def hint(cf, args):
@@ -31,7 +31,8 @@ def resolve(cf, args):
                          cf._taken(state_db, queue_db), limit=10**9,
                          aliases=load_search_aliases(Path('config/search_aliases.yaml')))
     rows = [cf._item_json(source_of.get(id(item), ''), item) for item in found]
-    rows = [{**row, 'model': model_name(row['model'])} for row in rows]
+    known_brands = {str(item.brand).strip() for _, item in labelled if item.brand}
+    rows = [resolve_identity({**row, 'model': model_name(row['model'])}, known_brands) for row in rows]
     quotas = cf._quotas(args.quotas)
     eligible = select_rows(rows, quotas=quotas, mode='first')
     selected = select_rows(rows, count=args.count, quotas=quotas,
@@ -68,7 +69,7 @@ def enqueue(cf, args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'batch-status', 'publish-keys', 'cancel'))
+    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'publish-audited', 'batch-status', 'publish-keys', 'cancel'))
     parser.add_argument('--audit-json')
     parser.add_argument('--supplier-file')
     for name in ('state-db', 'prices-dir', 'queue-db', 'category', 'source', 'quotas', 'btu',
@@ -80,7 +81,7 @@ def main(argv=None):
     for flag in ('inverter', 'heat-pump', 'full-dc', 'no-wake'):
         parser.add_argument('--' + flag, action='store_true')
     args = parser.parse_args(argv)
-    if args.command not in ('hint', 'enqueue-supplier', 'resume-photo', 'batch-status', 'publish-keys', 'cancel') and not args.category:
+    if args.command not in ('hint', 'enqueue-supplier', 'resume-photo', 'publish-audited', 'batch-status', 'publish-keys', 'cancel') and not args.category:
         parser.error('--category is required')
     if args.command == 'enqueue-supplier' and not args.supplier_file:
         parser.error('--supplier-file is required')
@@ -91,6 +92,9 @@ def main(argv=None):
     elif args.command in ('batch-status', 'publish-keys', 'cancel'):
         from orchestrator_bot.key_commands import run
         result = run(cf, args)
+    elif args.command=='publish-audited':
+        from orchestrator_bot.photo_publication import run
+        result=run(cf,args)
     elif args.command == 'resume-photo':
         from orchestrator_bot.photo_recovery import reconcile
         state, _, queue = cf._paths(args)

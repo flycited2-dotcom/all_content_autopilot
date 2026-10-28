@@ -48,10 +48,12 @@ def _current_approval(root, product_id, fingerprint):
     database = Path(root) / 'runs/photo-auditor/audit.sqlite3'
     try:
         with sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True, timeout=10) as db:
-            row = db.execute('SELECT status,sha256 FROM audits WHERE product_id=? ORDER BY revision DESC LIMIT 1',
+            row = db.execute('SELECT status,sha256,product,report FROM audits WHERE product_id=? ORDER BY revision DESC LIMIT 1',
                              (product_id,)).fetchone()
-        return bool(row and row[0] == 'approved' and row[1] == fingerprint)
-    except sqlite3.Error:
+        from photo_auditor.runtime import approval_covers_brief
+        return bool(row and row[0] == 'approved' and row[1] == fingerprint and
+                    approval_covers_brief(root, json.loads(row[2]), json.loads(row[3]) if row[3] else None))
+    except (sqlite3.Error, ValueError, TypeError, KeyError):
         return False
 
 
@@ -94,19 +96,15 @@ async def checked_output(root, product_id, brand, model, generated_path, supplie
             if result["sha256"] != fingerprint or result["product"] != product or digest(path.read_bytes()) != fingerprint:
                 raise AuditHold("Результат проверки относится к другому снимку/товару")
             if result["status"] == "approved":
+                from photo_auditor.runtime import approval_covers_brief
+                if not approval_covers_brief(root, product, result.get('report')):
+                    raise AuditHold('Проверка текста и оформления этого задания ещё не завершена')
                 payload = {"product_id": product_id, "sha256": fingerprint}
                 signature = hmac.new(config["api_token"].encode(), json.dumps(payload, sort_keys=True).encode(), hashlib.sha256).hexdigest()
                 write_json(_permit(root, product_id, fingerprint), {"payload": payload, "signature": signature})
                 return path
-            if result['status'] == 'review' and repair_reference and revision < MAX_REGENERATIONS:
-                from photo_auditor.store import AuditStore
-                store = AuditStore(Path(root) / 'runs/photo-auditor')
-                if store.request_reference_repair(result['id']):
-                    response = await http.get(url + '/audits/' + result['id'], headers=headers)
-                    response.raise_for_status()
-                    result = response.json()
-                    if result['sha256'] != fingerprint or result['product'] != product:
-                        raise AuditHold('Изменился снимок при подготовке официального исходника')
+            # Inconclusive evidence is not a request to redraw or replace the product.
+            # Only a confirmed discrepancy (regenerate) may invoke the repair callback.
             if result["status"] != "regenerate" or revision >= MAX_REGENERATIONS:
                 raise AuditHold("Фото остановлено для ручной проверки: " + result["id"][:12])
             if time.monotonic() >= deadline:

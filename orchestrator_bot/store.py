@@ -312,22 +312,39 @@ class Store:
             r = db.execute("SELECT * FROM batches WHERE log_id=?", (log_id,)).fetchone()
         return {**dict(r), "keys": json.loads(r["keys"])} if r else None
 
-    def move_batch(self, log_id: int, src: tuple, dst: str, now=None) -> bool:
+    def move_batch(self, log_id: int, src: tuple, dst: str, now=None, *, expected_updated=None) -> bool:
         marks = ",".join("?" for _ in src)
+        revision = " AND updated=?" if expected_updated is not None else ""
+        params = (dst, now or time.time(), log_id, *src)
+        if expected_updated is not None:
+            params += (expected_updated,)
         with self._c() as db:
-            cur = db.execute(f"UPDATE batches SET status=?, updated=? WHERE log_id=? AND status IN ({marks})",
-                             (dst, now or time.time(), log_id, *src))
+            cur = db.execute(f"UPDATE batches SET status=?, updated=? WHERE log_id=? AND status IN ({marks})" + revision,
+                             params)
         return cur.rowcount == 1
 
-    def reopen_recovered_batches(self, key: str, now=None) -> int:
-        """Late audit recovery reopens failed batches, preserving owner cancellation."""
+    def reopen_recovered_batches(self, key: str, now=None, *, recovery_id=None) -> int:
+        """Refresh an undecided batch once per recovered audit; keep owner decisions."""
+        if recovery_id is not None and (not isinstance(recovery_id, str) or not recovery_id):
+            raise ValueError('Нужен идентификатор восстановления')
+        marker = 'batch-photo-recovery:' + json.dumps([key, recovery_id]) if recovery_id is not None else None
         changed = 0
         with self._c() as db:
-            rows = db.execute("SELECT log_id,keys FROM batches WHERE status='failed'").fetchall()
+            db.execute('BEGIN IMMEDIATE')
+            if marker and db.execute('SELECT 1 FROM meta WHERE key=?', (marker,)).fetchone():
+                return 0
+            states = ('failed', 'ready', 'open') if marker else ('failed', 'ready')
+            marks = ','.join('?' for _ in states)
+            rows = db.execute(f'SELECT log_id,keys,updated FROM batches WHERE status IN ({marks})', states).fetchall()
             for row in rows:
                 if key in json.loads(row['keys']):
-                    changed += db.execute("UPDATE batches SET status='open',updated=? WHERE log_id=? AND status='failed'",
-                                          (now or time.time(), row['log_id'])).rowcount
+                    # Advancing an already-open batch also invalidates a concurrent stale poll.
+                    updated = max(now or time.time(), row['updated'] + 0.000001)
+                    changed += db.execute(f"UPDATE batches SET status='open',updated=? WHERE log_id=? AND status IN ({marks})",
+                                          (updated, row['log_id'], *states)).rowcount
+            if marker:
+                db.execute('INSERT INTO meta(key,value) VALUES(?,?)', (marker, str(now or time.time())))
+            db.commit()
         return changed
 
     # ── черновики оркестратора (этап 3) ──

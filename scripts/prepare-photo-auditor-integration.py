@@ -11,7 +11,7 @@ def patched(source):
     if 'PHOTO_AUDIT_BRIDGE_V' in source or 'Контроль товара до любых outbox' in source:
         raise ValueError("Интеграция уже присутствует")
     bootstrap = '''
-# PHOTO_AUDIT_BRIDGE_V6: connected source research, durable facts, independent photo audit.
+# PHOTO_AUDIT_BRIDGE_V9: content-manager gate and corrections through the original configured generator.
 AUDIT_ROOT = None
 class PhotoAuditHold(RuntimeError):
     pass
@@ -26,58 +26,43 @@ if _audit_settings.exists():
             raise RuntimeError("Photo auditor project is unavailable")
         sys.path.insert(0, str(AUDIT_ROOT))
         from photo_auditor.integration import AuditHold as PhotoAuditHold, checked_output
-        from photo_auditor.runtime import register_job, requires_audit, guard_upload
+        from photo_auditor.runtime import register_job as _register_audit_job, requires_audit, guard_upload
+        from photo_auditor.presentation import capture as _capture_audit_presentation
+        def register_job(root, job_id, mode, brand, model, specs):
+            required = _register_audit_job(root, job_id, mode, brand, model, specs)
+            if required and mode != 'research':
+                cfg = get_mode(mode)
+                _capture_audit_presentation(root, job_id,
+                    cfg.render_prompt(specs, brand=brand, model=model), cfg.reference_files)
+            return required
         from photo_auditor.progress import restore as restore_audit_output, starting as start_audit_generation, rejected as audit_generation_rejected
-        from photo_auditor.progress import save_research, restore_research
-        from photo_auditor.layout import render_card as render_exact_product_card
+        from photo_auditor.progress import save_research, restore_research, start_research as start_audit_research, generated as save_audit_output
+        from photo_auditor.repairs import regeneration_specs
         from photo_auditor.reference_asset import latest as verified_reference_asset, typed as typed_source_photo
-        from photo_auditor.research import SourceUnavailable
-        from photo_auditor.connected_research import research as connected_research
-        from listener.provider_errors import ProviderError as ResearchProviderError
-        from uuid import uuid4 as audit_uuid
-        _original_product_research = process_research
-        async def process_research(brand, model, category, **kwargs):
-            if (category or "").strip().casefold() == "editorial":
-                return await _original_product_research(brand, model, category, **kwargs)
-            try:
-                return await connected_research(AUDIT_ROOT, brand, model, category)
-            except ResearchProviderError as error:
-                if error.kind in ("usage_limit", "network", "rate_limit"):
-                    raise UploadLimitError("Поиск ожидает ChatGPT: " + error.kind) from None
-                raise PhotoAuditHold("Для поиска требуется проверить подключение ChatGPT") from None
+        from photo_auditor.research import SourceUnavailable, search_product
 '''
     bind = '''                            if AUDIT_ROOT is not None:
                                 register_job(AUDIT_ROOT, job_id, job_mode, job_brand, job_model, job_specs)
 '''
     card_gate = '''                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
                                 async def regenerate_with_audit(notes):
-                                    # The audit identified a product distortion. Preserve the real asset.
-                                    target = ROOT / "output" / f"audit_repair_{job_id}_{audit_uuid().hex[:8]}.png"
-                                    try:
-                                        return await render_exact_product_card(
-                                            verified_reference_asset(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model) or tmp_input,
-                                            target, job_brand, job_model, job_specs)
-                                    except Exception as error:
-                                        raise PhotoAuditHold("Не удалось собрать карточку с исходным фото") from error
+                                    return await process_one_file(
+                                        verified_reference_asset(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model) or tmp_input,
+                                        mode=job_mode, specs=regeneration_specs(job_specs, notes),
+                                        brand=job_brand, model=job_model, cdp_url=CDP_URL,
+                                        project_url=(LANE.project_url_for(job_mode) if LANE else None) or None)
                                 output_path = await checked_output(
                                     AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model,
                                     output_path, tmp_input, regenerate_with_audit,
                                     start_revision=restored_audit["revision"] if restored_audit else 0,
-                                    repair_reference=True)
+                                    repair_reference=False)
 '''
     research_gate = '''                            if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
                                 async def regenerate_research_with_audit(notes):
-                                    nonlocal utp
                                     reference = verified_reference_asset(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
-                                    if reference:
-                                        result_photo = typed_source_photo(reference)
-                                    else:
-                                        result_photo, utp = await process_research(
-                                            job_brand, job_model, (job_specs or "") + "\\n\\n" + notes,
-                                            cdp_url=CDP_URL,
-                                            project_url=(LANE.project_url_for("research") if LANE else None) or None)
-                                    save_research(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model, utp)
-                                    return result_photo
+                                    if not reference:
+                                        raise PhotoAuditHold("Для исправления нет проверенного фото точной модели")
+                                    return typed_source_photo(reference)
                                 if photo is None:
                                     raise PhotoAuditHold("Research did not return a product photo")
                                 photo = await checked_output(
@@ -139,15 +124,10 @@ if _audit_settings.exists():
                                     AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
                             if restored_audit:
                                 output_path = restored_audit["path"]
-                            elif AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
-                                # Product geometry is an asset, not something to redraw.
-                                target = ROOT / "output" / f"product_card_{job_id}_{audit_uuid().hex[:8]}.png"
-                                try:
-                                    output_path = await render_exact_product_card(
-                                        tmp_input, target, job_brand, job_model, job_specs)
-                                except Exception as error:
-                                    raise PhotoAuditHold("Не удалось собрать карточку с исходным фото") from error
                             else:
+                                if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
+                                    start_audit_generation(AUDIT_ROOT, f"fotogen-{job_id}",
+                                                           job_brand, job_model, 0, paid=True)
 ''' + '\n'.join('    ' + line for line in call.splitlines())
     source = source[:begin] + card_start + source[end:]
     research_anchor = '                            photo, utp = await process_research('
@@ -155,23 +135,31 @@ if _audit_settings.exists():
     research_end = '\n                                             if LANE else None) or None)'
     end = source.index(research_end, begin) + len(research_end)
     research_call = source[begin:end]
+    product_research_call = research_call.replace('await process_research(', 'await search_product(process_research,', 1)
     research_start = bind + '''                            research_revision = 0
                             restored_research = None
                             if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
                                 restored_research = restore_research(
                                     AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
-                            if restored_research:
-                                photo, utp = restored_research["path"], restored_research["specs"]
-                                research_revision = restored_research["revision"]
-                            else:
-''' + '\n'.join('    ' + line for line in research_call.splitlines()) + '''
-                                if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
+                                if restored_research is None:
                                     frozen_research = restore_audit_output(
                                         AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
                                     if frozen_research:
-                                        photo, research_revision = frozen_research["path"], frozen_research["revision"]
+                                        raise PhotoAuditHold("Сохранённое фото ожидает восстановления характеристик; повторная генерация остановлена")
+                            if restored_research:
+                                photo, utp = restored_research["path"], restored_research["specs"]
+                                research_revision = restored_research["revision"]
+                            elif AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
+                                start_audit_research(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model)
+''' + '\n'.join('    ' + line for line in product_research_call.splitlines()) + '''
+                            else:
+''' + '\n'.join('    ' + line for line in research_call.splitlines()) + '''
                             if AUDIT_ROOT is not None and requires_audit(AUDIT_ROOT, job_id):
-                                save_research(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model, utp)'''
+                                if photo is None:
+                                    raise PhotoAuditHold("Research did not return a product photo")
+                                save_research(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model, utp)
+                                save_audit_output(AUDIT_ROOT, f"fotogen-{job_id}", job_brand, job_model,
+                                                  research_revision, photo)'''
     source = source[:begin] + research_start + source[end:]
     replacements = [
         ('import upload_outbox  # noqa: E402\n', 'import upload_outbox  # noqa: E402\n' + bootstrap),
@@ -183,7 +171,7 @@ if _audit_settings.exists():
         ('                        except UploadLimitError as e:', hold_card + '                        except UploadLimitError as e:\n' + quota_card.rstrip()),
         ('                        except GenerationRateLimitError as e:', '                        except GenerationRateLimitError as e:\n' + quota_card.rstrip()),
         ('                if r.status_code == 404:', missing_input + '                if r.status_code == 404:'),
-        ('                        except (UploadLimitError, GenerationRateLimitError) as e:', hold_research + '                        except (UploadLimitError, GenerationRateLimitError) as e:'),
+        ('                        except (UploadLimitError, GenerationRateLimitError) as e:', hold_research + '                        except (UploadLimitError, GenerationRateLimitError) as e:\n' + quota_card.rstrip()),
     ]
     for anchor, replacement in replacements:
         if source.count(anchor) != 1:

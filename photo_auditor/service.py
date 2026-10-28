@@ -12,16 +12,55 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from listener.provider_errors import ProviderError
 from orchestrator_bot.api import text_chunks
 from photo_auditor.engine import feedback
+from photo_auditor.content_review import ContentReviewError
+from photo_auditor.store import sanitize_provider_error
+from photo_auditor.integration import AuditHold
 
 log = logging.getLogger("photo_auditor")
 MAX_BODY = 29 * 1024 * 1024
-LABELS = {"approved": "✅ Проверка пройдена", "regenerate": "🔄 Вернуть на генерацию", "review": "🔎 Нужна ручная проверка"}
+LABELS = {"approved": "✅ Соответствие изображения товара проверено", "regenerate": "🔄 Требуется исправить изображение товара", "review": "🔎 Нужна ручная проверка товара"}
 
 
 def public_result(audit):
     report = audit["report"]
     return {"id": audit["id"], "status": audit["status"], "sha256": audit["sha256"],
-            "product": audit["product"], "report": report, "feedback": feedback(report) if report else None}
+            "product": audit["product"], "report": report, "feedback": feedback(report) if report else None,
+            "provider_error": audit.get("provider_error"), "retry_at": audit.get("retry_at", 0)}
+
+
+def provider_reason(diagnostic):
+    """Explain this adapter's failure without claiming the user's ChatGPT is down."""
+    diagnostic = sanitize_provider_error(diagnostic) or {}
+    if diagnostic.get('code') == 'subscription_sharing_usage_limit_exceeded':
+        return ('Программное подключение аудитора отклонило запрос по ограничению использования '
+                '(subscription_sharing_usage_limit_exceeded). Это не проверка доступности '
+                'вашего генератора в ChatGPT. Доступ приложения: https://chatgpt.com/settings/usage')
+    return {
+        'usage_limit': 'Программное подключение аудитора отклонило запрос по ограничению использования.',
+        'network': 'Программное подключение аудитора не завершило сетевой запрос.',
+        'rate_limit': 'Программное подключение аудитора временно ограничило частоту запросов.',
+        'auth': 'Требуется проверить вход программного подключения аудитора.',
+        'configuration': 'Требуется проверить разрешения программного подключения аудитора.',
+        'invalid_response': 'Программное подключение аудитора не вернуло корректный завершённый ответ.',
+    }.get(diagnostic.get('kind'), 'Причина прежнего ожидания не сохранена; доступность вашего генератора в ChatGPT не проверялась.')
+
+
+def waiting_text(row):
+    delay = max(0, int(row.get('retry_at', 0) - time.time()))
+    return (f"⏳ {row['product']['brand']} {row['product']['model']}: фото сохранено. "
+            f"{provider_reason(row.get('provider_error'))}\n"
+            f"Повтор проверки этого файла — примерно через {(delay + 59) // 60} мин. "
+            f"Повторить сейчас: /retry {row['id']}\n"
+            "Новая генерация не запускается. Выгрузка ожидает завершения проверки.")
+
+
+def status_text(store):
+    counts = store.status()
+    text = 'Контроль фотографий: ' + (', '.join(f'{k}: {v}' for k, v in counts.items()) or 'очередь пуста')
+    waiting = store.waiting()
+    if waiting:
+        text += '\n\n' + '\n\n'.join(waiting_text(row) for row in waiting)
+    return text
 
 
 def make_server(store, token, port=8793):
@@ -50,6 +89,8 @@ def make_server(store, token, port=8793):
                 return self.send_json(200, store.status())
             if self.path.startswith("/audits/"):
                 row = store.get(self.path.removeprefix("/audits/"))
+                if row:
+                    store.consumer_waiting(row['id'])
                 return self.send_json(200 if row else 404, public_result(row) if row else {"error": "not found"})
             self.send_json(404, {"error": "not found"})
 
@@ -68,6 +109,12 @@ def make_server(store, token, port=8793):
                 generated = base64.b64decode(value["generated"], validate=True)
                 supplier = base64.b64decode(value["supplier"], validate=True) if value.get("supplier") else None
                 audit = store.submit(value["product"], generated, supplier)
+                store.consumer_waiting(audit['id'])
+                if audit['status'] == 'approved':
+                    from photo_auditor.runtime import approval_covers_brief
+                    if not approval_covers_brief(store.root.parent.parent, audit['product'], audit['report']):
+                        store.recheck(audit['id'])
+                        audit = store.get(audit['id'])
             except (ValueError, TypeError, KeyError):
                 return self.send_json(400, {"error": "Invalid product, revision or image; snapshot conflict"})
             self.send_json(200, public_result(audit))
@@ -78,6 +125,16 @@ def process_one(store, auditor, audit_id=None):
     row = store.claim(audit_id=audit_id)
     if row is None:
         return False
+    lease_stop = threading.Event()
+    def keep_lease():
+        while not lease_stop.wait(30):
+            try:
+                if not store.renew_lease(row):
+                    return
+            except Exception:
+                log.warning('Продление проверки %s отложено', row['id'][:12])
+    lease_worker = threading.Thread(target=keep_lease, daemon=True)
+    lease_worker.start()
     try:
         path = store.root / row["id"]
         from photo_auditor.images import digest
@@ -86,14 +143,26 @@ def process_one(store, auditor, audit_id=None):
                                "checks": [], "sources": [], "dimensions_note": "Проверка остановлена."})
         else:
             store.finish(row, auditor.run(row["product"], path))
+    except ContentReviewError as exc:
+        store.defer(row, 'Контроль содержания не завершён: ' + str(exc))
     except ProviderError as exc:
-        log.warning("Проверка ожидает провайдера: %s; %s", exc.kind, exc)
+        diagnostic = sanitize_provider_error({'provider': exc.provider, 'kind': exc.kind, 'code': exc.code})
+        reason = provider_reason(diagnostic)
+        log.warning("Программное подключение аудитора: %s; %s", exc.kind, reason)
+        if exc.kind in ('auth', 'configuration'):
+            store.finish(row, {'verdict': 'review', 'reason': reason,
+                              'checks': [], 'sources': [], 'dimensions_note': 'Проверка не завершена.'})
+            return True
         delay = 3600 if exc.kind == 'usage_limit' else 300
-        store.defer(row, "Проверка не завершена: провайдер недоступен (" + exc.kind + ").",
-                    retry_at=exc.retry_at or time.time() + delay, provider_wait=True)
+        store.defer(row, reason, retry_at=exc.retry_at or time.time() + delay,
+                    provider_wait=exc.kind in ('usage_limit', 'network', 'rate_limit'),
+                    provider_error=diagnostic)
     except Exception as exc:
         log.warning("Проверка не завершена: %s", type(exc).__name__)
         store.defer(row, "Проверка источников/изображений не завершена: " + type(exc).__name__)
+    finally:
+        lease_stop.set()
+        lease_worker.join(timeout=1)
     return True
 
 
@@ -101,6 +170,17 @@ def worker_loop(store, auditor, stop):
     while not stop.is_set():
         if not process_one(store, auditor):
             stop.wait(2)
+
+
+def start_workers(store, auditor_factory, stop, count=2):
+    if type(count) is not int or not 1 <= count <= 2:
+        raise ValueError('Допустима одна или две параллельные проверки')
+    workers = []
+    for _ in range(count):
+        worker = threading.Thread(target=worker_loop, args=(store, auditor_factory(), stop), daemon=True)
+        worker.start()
+        workers.append(worker)
+    return workers
 
 
 def watch_parent(parent, stop):
@@ -114,10 +194,12 @@ def watch_parent(parent, stop):
 
 def notify(store, tg, owner):
     for row in store.waiting_notifications():
-        tg.send(owner, f"⏳ {row['product']['brand']} {row['product']['model']}: фото сохранено. "
-                       "Проверка ожидает доступности ChatGPT и продолжится автоматически. Новая генерация не запускается.")
+        tg.send(owner, waiting_text(row))
         store.notified(row['id'])
     for row in store.pending_notifications():
+        if store.latest(row['product_id'])['id'] != row['id']:
+            store.notified(row['id'])
+            continue
         generated_job = re.fullmatch(r'fotogen-([1-9][0-9]*)', row['product_id'])
         intermediate = bool(generated_job and row['status'] == 'regenerate')
         if generated_job and row['status'] == 'approved':
@@ -133,18 +215,58 @@ def notify(store, tg, owner):
             store.notified(row['id'])
             continue
         report = row["report"]
+        managed = bool(report.get('content_review'))
         folder = store.root / row["id"]
+        from photo_auditor.images import digest, image_bytes
+        snapshot = folder / 'generated.bin'
+        image_problem = None
+        try:
+            data = image_bytes(snapshot.read_bytes())
+            if digest(data) != row['sha256']:
+                raise ValueError('Changed snapshot')
+        except (OSError, ValueError):
+            image_problem = 'Фото отсутствует или повреждено; визуальную оценку запросить нельзя.'
+        if image_problem is None:
+            tg.send_photo(owner, snapshot, caption=(
+                f"Карточка для проверки: {row['product']['brand']} {row['product']['model']}\n"
+                f"Ревизия: {row['revision']}. Проверка: {row['id'][:12]}"))
         sheet = folder / "comparison.jpg"
-        if sheet.exists():
+        if image_problem is None and sheet.exists():
             tg.send_photo(owner, sheet, caption=f"{row['product']['brand']} {row['product']['model']}: GENERATED / SOURCE")
-        text = (f"{LABELS[row['status']]}\n{row['product']['brand']} {row['product']['model']}\n"
+        human = bool(report.get('owner_approval'))
+        label = ('✅ Результат подтверждён владельцем' if human else
+                 '✅ Карточка прошла контент-контроль' if managed and row['status'] == 'approved' else LABELS[row['status']])
+        scope_note = ('Результат принят владельцем; автоматическое заключение сохранено в истории. '
+                      'Публикация — по решению владельца партии.' if human else
+                      'Проверены товар, надписи, факты, читаемость и компоновка по исходному заданию. '
+                      'Публикацию подтверждает владелец.' if managed and row['status'] == 'approved' else
+                      'Автоматическое одобрение не выдано. Публикация не разрешена этим отчётом.'
+                      if row['status'] != 'approved' else
+                      'Этот результат подтверждает только соответствие изображения товара. '
+                      'Оформление карточки и пригодность для Telegram или ВК требуют отдельного согласования. '
+                      'Публикацию подтверждает владелец.')
+        text = (f"{label}\n{row['product']['brand']} {row['product']['model']}\n"
                 f"Ревизия: {row['revision']}. Проверка: {row['id'][:12]}\n\n{feedback(report)}\n\n"
-                f"Размеры: {report['dimensions_note']}\n\nРешение относится к фотографии; публикацию подтверждает владелец.")
+                f"Размеры: {report['dimensions_note']}\n\n"
+                f"{scope_note}")
         parts = list(text_chunks(text))
         keyboard = [[{'text': title, 'callback_data': f"qa:{code}:{row['id']}"}]
-                    for title, code in [('Соответствует товару', 'match'),
-                                        ('Есть расхождение', 'mismatch'), ('Не могу определить', 'unclear')]]
-        parts[-1] += '\n\nОцените результат для калибровки аудитора. Оценка не запускает публикацию.'
+                    for title, code in [('✅ Принять без публикации', 'approve'),
+                                        ('🔄 Перепроверить / исправить', 'recheck')]]
+        from photo_auditor.runtime import content_brief
+        try:
+            publishable=content_brief(store.root.parent.parent,row['product']) is not None
+        except (AuditHold,OSError,ValueError):
+            publishable=False
+        if publishable:
+            keyboard.insert(0,[{'text':'✅ Подтвердить и опубликовать в канал','callback_data':f"qa:publish:{row['id']}"}])
+        if image_problem is None:
+            parts[-1] += ('\n\nПодтверждение принимает именно приложенный файл от вашего имени. '
+                          '«Опубликовать в канал» также запрашивает его публикацию после доставки; '
+                          '«Без публикации» оставляет результат в группе проверки. Новая генерация не запускается.')
+        else:
+            parts[-1] += '\n\n' + image_problem
+            keyboard = None
         # Keep the extra footer within Telegram's limit even for long source lists.
         chunks = list(text_chunks('\n'.join(parts)))
         for n, part in enumerate(chunks):
@@ -171,11 +293,18 @@ def recover_pipeline(store, deliver=None):
         from photo_auditor import runtime, progress
         root = store.root.parent.parent
         scope_path = root / 'runs/photo-auditor/job-scope' / (match[1] + '.json')
-        if scope_path.exists():
+        if not scope_path.exists():
+            continue
+        try:
             scope = runtime._read(root, int(match[1]))
             if scope.get('mode') == 'research' and not progress.restore_research(
                     root, row['product_id'], row['product']['brand'], row['product']['model']):
                 continue
+            if row['status'] == 'approved' and not runtime.approval_covers_brief(root, row['product'], row['report']):
+                continue
+        except Exception:
+            log.warning('Восстановление задания %s отложено: не подтверждено исходное задание', match[1])
+            continue
         payload = {'job_id': int(match[1]), 'audit_id': row['id'], 'attempt': row['attempt'],
                    'revision': row['revision'], 'status': row['status'], 'sha256': row['sha256'],
                    'brand': row['product']['brand'], 'model': row['product']['model']}
@@ -194,13 +323,47 @@ def handle_update(update, store, tg, owner):
         if callback.get('from', {}).get('id') != owner or callback.get('message', {}).get('chat', {}).get('id') != owner:
             return
         data = callback.get('data', '').split(':')
-        import re
         if len(data) == 3 and data[0] == 'qa' and re.fullmatch('[a-f0-9]{32}', data[2]):
+            # Acknowledge before recovery/network work; a late Telegram callback
+            # acknowledgement must not undo an already persisted owner decision.
             try:
-                saved = store.feedback(data[2], data[1])
-            except ValueError:
-                saved = False
-            tg.answer_callback(callback['id'], 'Оценка сохранена' if saved else 'Проверка не найдена')
+                tg.answer_callback(callback['id'], 'Обрабатываю решение…')
+            except Exception:
+                pass
+            try:
+                if data[1] in ('approve','match','publish'):
+                    result = store.owner_approve(data[2], owner, callback['id'],publish=data[1]=='publish')
+                    product=result['product']
+                    message=(f"✅ Подтверждено: {product['brand']} {product['model']}.\n"
+                             'Сохранённый файл принят и передан для продолжения исходного задания. '
+                             'Новая генерация не запускается. '+
+                             ('Публикация в канал запрошена; бот сообщит о результате.' if data[1]=='publish' else
+                              'Принято без публикации; готовая карточка останется в группе проверки.'))
+                elif data[1]=='recheck':
+                    row=store.get(data[2])
+                    if not row or store.latest(row['product_id'])['id']!=row['id']:
+                        raise ValueError('Это старая фотография. Откройте последнюю ревизию в аудиторе.')
+                    accepted = store.retry_waiting(row['id']) if row['status']=='waiting_provider' else store.recheck(row['id'])
+                    if not accepted:
+                        raise ValueError('Проверка уже выполняется или исправление уже передано генератору.')
+                    store.consumer_waiting(row['id'])
+                    message='🔄 Сохранённое фото поставлено на повторную проверку. При подтверждённом дефекте аудитор передаст замечания генератору.'
+                else:
+                    saved=store.feedback(data[2],data[1])
+                    if not saved:raise ValueError('Проверка не найдена')
+                    message='Оценка сохранена. Для действия используйте «Подтвердить и продолжить» или «Перепроверить / исправить» под последним фото.'
+            except (ValueError,OSError,AuditHold) as exc:
+                message='Решение не применено: '+str(exc)
+                old=store.get(data[2])
+                latest=store.latest(old['product_id']) if old else None
+                if latest and latest['id']!=old['id'] and latest['report']:
+                    with store.connect() as db:
+                        db.execute('UPDATE audits SET notified=0 WHERE id=?',(latest['id'],))
+            tg.send(owner,message)
+            try:
+                tg.clear_buttons(owner,callback['message']['message_id'])
+            except Exception:
+                pass
         return
     message = update.get("message") or {}
     if message.get("from", {}).get("id") != owner or message.get("chat", {}).get("id") != owner:
@@ -208,11 +371,24 @@ def handle_update(update, store, tg, owner):
     text = (message.get("text") or "").strip()
     if text in ("/start", "/help"):
         tg.send(owner, "Я проверяю фотографии по точной номенклатуре. Отправьте фото с подписью «Бренд | Модель» "
-                       "или подключите фотоагент. /status — очередь. При замечаниях — до двух повторных генераций; "
+                       "или подключите фотоагент. /status — очередь и причины ожидания. "
+                       "/retry <id> — повторить ожидающую проверку того же файла. При замечаниях — до двух повторных генераций; "
                        "при нехватке эталонов — ручная проверка.")
     elif text == "/status":
-        counts = store.status()
-        tg.send(owner, "Контроль фотографий: " + (", ".join(f"{k}: {v}" for k, v in counts.items()) or "очередь пуста"))
+        for part in text_chunks(status_text(store)):
+            tg.send(owner, part)
+    elif text.split(maxsplit=1)[0:1] == ['/retry']:
+        parts = text.split()
+        if len(parts) != 2 or not re.fullmatch('[a-f0-9]{32}', parts[1]):
+            tg.send(owner, 'Команда: /retry <полный id проверки из /status>. Повторяется только проверка сохранённого фото.')
+            return
+        try:
+            accepted = store.retry_waiting(parts[1])
+        except (OSError, ValueError):
+            tg.send(owner, 'Снимок не прошёл проверку целостности; повтор остановлен.')
+            return
+        tg.send(owner, 'Повтор проверки сохранённого фото поставлен в очередь. Новая генерация не запускается.'
+                if accepted else 'Ожидающая проверка не найдена или уже запущена. Проверьте /status.')
     elif message.get("photo") or message.get("document"):
         caption = (message.get("caption") or "").strip().split("|", 1)
         if len(caption) != 2 or not all(s.strip() for s in caption):
@@ -238,8 +414,6 @@ def handle_update(update, store, tg, owner):
 def run_bot(store, tg, owner, stop):
     while not stop.is_set():
         try:
-            recover_pipeline(store)
-            notify(store, tg, owner)
             for update in tg.get_updates(store.offset(), timeout=20):
                 handle_update(update, store, tg, owner)
                 store.offset(update["update_id"] + 1)
@@ -247,3 +421,51 @@ def run_bot(store, tg, owner, stop):
             # Telegram HTTP errors contain credential-bearing URLs; never log them.
             log.warning("Telegram временно недоступен: %s", type(exc).__name__)
             stop.wait(10)
+
+
+def maintenance_loop(store, tg, owner, stop):
+    """Slow recovery/photo delivery cannot block the owner's Telegram buttons."""
+    while not stop.is_set():
+        try:
+            recover_pipeline(store)
+            recover_publications(store,tg=tg,owner=owner)
+            notify(store,tg,owner)
+        except Exception as exc:
+            log.warning('Доставка результатов отложена: %s',type(exc).__name__)
+        stop.wait(3)
+
+
+def recover_publications(store, deliver=None, *, tg=None, owner=None):
+    if deliver is None:
+        token=os.environ.get('ORCH_API_TOKEN')
+        if not token:return
+        from listener.client import ApiClient
+        import httpx
+        with httpx.Client(timeout=20,trust_env=False) as http:
+            api=ApiClient(os.environ.get('ORCH_API_URL','http://127.0.0.1:8790'),token,http=http)
+            return recover_publications(store,lambda p:api._post('/photo-audit-publish',p),tg=tg,owner=owner)
+    from photo_auditor import owner_decisions
+    for request in store.pending_publications():
+        row=store.get(request['audit_id'])
+        if not row or store.latest(row['product_id'])['id']!=row['id']:
+            store.publication_finished(request['audit_id'],{'cancelled':True,'reason':'superseded'});continue
+        report=row['report'] or {}
+        if row['status']!='approved' or not owner_decisions.valid(store.root.parent.parent,row['product'],report):
+            store.publication_finished(row['id'],{'cancelled':True,'reason':'approval_revoked'});continue
+        approval=report['owner_approval']['payload']
+        if not approval['publish_requested'] or owner is not None and approval['actor_id']!=owner:
+            store.publication_finished(row['id'],{'cancelled':True,'reason':'publication_not_authorized'});continue
+        match=re.fullmatch(r'fotogen-([1-9][0-9]*)',row['product_id'])
+        if not match:continue
+        payload={'job_id':int(match[1]),'audit_id':row['id'],'attempt':0,'revision':row['revision'],
+                 'status':'approved','sha256':row['sha256'],'brand':row['product']['brand'],'model':row['product']['model']}
+        try:
+            result=deliver(payload)
+        except Exception as exc:
+            log.warning('Публикация подтверждённой карточки отложена: %s',type(exc).__name__);continue
+        if result.get('handled'):
+            store.publication_finished(row['id'],result)
+            if tg is not None:
+                label='✅ Опубликовано в канале' if result.get('published') else '⚠️ Публикация остановлена'
+                tg.send(owner,f"{label}: {row['product']['brand']} {row['product']['model']}."+
+                        ('' if result.get('published') else ' Причина: '+str(result.get('reason','проверьте статус задания'))))
