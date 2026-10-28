@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $branch = 'codex/photo-audit-agent-ffrkpl'
 $target = "origin/$branch"
 $root = Split-Path -Parent $PSScriptRoot
-$gitExe = (Get-Command git -CommandType Application).Source
+$gitExe = (Get-Command git -CommandType Application | Select-Object -First 1).Source
 function git { & $gitExe -c "safe.directory=$root" @args }
 Push-Location $root
 try {
