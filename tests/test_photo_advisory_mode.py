@@ -95,6 +95,28 @@ def test_unavailable_service_releases_instead_of_failing_the_job(advisory):
     integration.require_permit(root, 'fotogen-7', path)
 
 
+def test_failed_source_only_repair_releases_unchanged_saved_file(advisory):
+    root, path = advisory
+    original = path.read_bytes()
+    async def unavailable(_):
+        raise integration.AuditHold('Для исправления нет проверенного фото точной модели')
+    result, _ = run_hook(root, path, ['regenerate'], unavailable, repair_reference=True)
+    assert result == path and path.read_bytes() == original
+    integration.require_permit(root, 'fotogen-7', path)
+    from photo_auditor import progress
+    saved = json.loads((progress.folder(root, 'fotogen-7') / 'state.json').read_text())
+    assert saved['phase'] == 'generated' and saved['revision'] == 0
+
+
+def test_uncertain_paid_repair_is_still_held(advisory):
+    root, path = advisory
+    async def unknown(_):
+        raise integration.AuditHold('Не подтверждён результат генерации')
+    with pytest.raises(integration.AuditHold):
+        run_hook(root, path, ['regenerate'], unknown, repair_reference=False)
+    assert not integration.released(root, 'fotogen-7', digest(path.read_bytes()))
+
+
 def test_wrong_snapshot_is_still_held_in_advisory_mode(advisory):
     root, path = advisory
     def handle(request):

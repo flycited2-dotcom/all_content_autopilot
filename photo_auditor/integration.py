@@ -153,7 +153,17 @@ async def checked_output(root, product_id, brand, model, generated_path, supplie
             if time.monotonic() >= deadline:
                 return hold_or_release("Контроль ещё не завершён; повторная генерация не запускалась")
             progress.starting(root, product_id, brand, model, revision + 1, paid=not repair_reference)
-            path = Path(await regenerate(result["feedback"]))
+            try:
+                repaired = await regenerate(result["feedback"])
+            except AuditHold as exc:
+                # Source-only correction cannot buy an image render. If it
+                # fails, advisory mode retains the known original with notes.
+                # An uncertain paid operation must still remain held.
+                if not advisory or not repair_reference or digest(path.read_bytes()) != fingerprint:
+                    raise
+                progress.generated(root, product_id, brand, model, revision, path, supplier=supplier_path)
+                return hold_or_release('Исправление исходника не выполнено; сохранено исходное фото: ' + str(exc))
+            path = Path(repaired)
             fingerprint = None
         return hold_or_release("Исчерпан лимит исправлений")
     except httpx.HTTPError:
