@@ -7,6 +7,7 @@ import yaml
 
 from photo_auditor.images import comparison_sheet, digest, vision_image
 from photo_auditor.sources import PublicWeb, canonical, model_key, official
+from photo_auditor.source_routes import instruction as source_instruction
 
 CHECKS = ("identity", "design", "shape", "proportions", "color", "details")
 STATUSES = ("match", "mismatch", "not_verifiable")
@@ -119,6 +120,7 @@ class Auditor:
             {"brand": product["brand"], "model": product["model"], "source_limit": remaining,
              "priority": "official manufacturer" if domains else "independent additional sources",
              'required_independent_sources': 1 if domains else min(3, remaining),
+             'preferred_catalog_instruction': source_instruction(product['brand'], product['model'], product.get('category', '')),
              'unavailable_urls': list(failed_urls),
              'fallback_instruction': 'При недоступности производителя найди минимум три независимых каталога точной модели; до пяти источников всего. Не повторяй недоступные URL.'}, ensure_ascii=False)}],
             search=True, domains=domains)

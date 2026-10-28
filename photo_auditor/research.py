@@ -2,6 +2,7 @@
 import json
 
 import httpx
+from photo_auditor.source_routes import instruction
 
 
 class SourceUnavailable(RuntimeError):
@@ -14,7 +15,7 @@ async def search_product(original, brand, model, category, **kwargs):
         return await original(brand, model, category, **kwargs)
     failures = []
     for _ in range(3):
-        request = category or ''
+        request = (category or '') + instruction(brand, model, category)
         if failures:
             request += ('\n\nПредыдущие источники проверены программой и не подошли. '
                 'Сохрани точные бренд и модель со всеми суффиксами. Найди другой открывающийся источник '

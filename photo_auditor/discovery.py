@@ -17,17 +17,26 @@ def owner(url):
 
 def collect(product, domains, research, web, folder):
     sources, paths, failures, hosts, failed_urls = [], [], [], set(), []
+    from photo_auditor.source_routes import candidates as preferred_candidates, route
+    preferred = route(product['brand'], product['model'], product.get('category', ''))
+    if preferred:
+        domains = preferred['domains']
+    direct = preferred_candidates(product, web)
     # A blocked shop must not consume the last search while only two usable
     # catalogs remain. Keep the number of searches and saved sources bounded.
-    for index, scope in enumerate([domains, (), (), ()] if domains else [(), (), ()]):
+    scopes = ([domains] if direct else []) + ([domains, (), (), ()] if domains else [(), (), ()])
+    for index, scope in enumerate(scopes):
         if index and (any(s['official'] and s.get('model_image_verified') for s in sources) or
                       len({owner(s['url']) for s in sources if s.get('model_image_verified')}) >= 3):
             break
         remaining = 5 - len(sources)
         if not remaining:
             break
-        candidates, cited = research(product, scope, remaining,
-                                     failed_urls=[*failed_urls, *(s['url'] for s in sources)])
+        if direct and index == 0:
+            candidates, cited = direct, [c['url'] for c in direct]
+        else:
+            candidates, cited = research(product, scope, remaining,
+                                         failed_urls=[*failed_urls, *(s['url'] for s in sources)])
         for candidate in candidates:
             if len(sources) == 5:
                 break

@@ -1,0 +1,8 @@
+# Owner-selected entry points; pages and model/photo identity are still verified.
+carver:
+  domains: [uralopt.ru]
+  category_terms: [генератор, generator]
+  model_prefixes: [PPG]
+  start_urls:
+    - https://uralopt.ru/products/Generators/
+    - https://uralopt.ru/products/diesel-generators/
