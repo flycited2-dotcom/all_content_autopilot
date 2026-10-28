@@ -24,6 +24,16 @@ def test_unverified_or_different_reference_does_not_supply_a_defect():
     assert preserve_defects(fresh, [old]) == fresh
 
 
+def test_accessory_reference_cannot_resurrect_an_old_product_defect():
+    old = evidence('regenerate', 'mismatch', 'accessories')
+    fresh = evidence(reference='whole-product')
+    fresh['sources'].append({'official': True, 'model_image_verified': True, 'image_sha256': 'accessories'})
+    fresh['source_checks'] = [
+        {'id': 1, 'main_product_visible': True, 'suitable_for_repair': True, 'reason': 'Целый товар'},
+        {'id': 2, 'main_product_visible': False, 'suitable_for_repair': False, 'reason': 'Одни детали'}]
+    assert preserve_defects(fresh, [old])['verdict'] == 'approved'
+
+
 def test_second_visual_pass_can_block_first_optimistic_response(tmp_path):
     import json
     from pathlib import Path
@@ -38,7 +48,10 @@ def test_second_visual_pass_can_block_first_optimistic_response(tmp_path):
             if search:
                 return {'text': json.dumps({'sources': [{'url': 'https://midea.com/p'}]}), 'sources': ['https://midea.com/p']}
             self.checks += 1
-            return {'text': json.dumps(comparison('match' if self.checks == 1 else 'mismatch'))}
+            return {'text': json.dumps({**comparison('match' if self.checks == 1 else 'mismatch'),
+                'limitations': [], 'source_checks': [
+                    {'id': 1, 'main_product_visible': True, 'suitable_for_repair': True,
+                     'reason': 'Основной товар виден.'}]})}
     class Web:
         def reference(self, candidate, model, cited, domains):
             return {**candidate, 'official': True, 'model_image_verified': True}, picture(), b'page'
@@ -50,9 +63,12 @@ def test_second_visual_pass_can_block_first_optimistic_response(tmp_path):
 
 def test_old_signed_permit_is_blocked_when_audit_is_no_longer_approved(tmp_path, monkeypatch):
     from photo_auditor import integration
+    from photo_auditor import runtime
     from photo_auditor.store import AuditStore
     from tests.test_photo_auditor import picture, product, report
     monkeypatch.setattr(integration, 'load', lambda _: {'api_token': 'test'})
+    monkeypatch.setattr(runtime, 'load', lambda _: {'api_token': 'test'})
+    runtime.register_job(tmp_path, 123, 'research', 'Midea', 'ABC-12-RU', 'Товарное фото')
     store = AuditStore(tmp_path / 'runs/photo-auditor')
     store.submit(product(), picture())
     store.finish(store.claim(), report('approved'))
@@ -64,9 +80,9 @@ def test_old_signed_permit_is_blocked_when_audit_is_no_longer_approved(tmp_path,
     assert not integration._current_approval(tmp_path / 'missing', 'fotogen-123', sha)
 
 
-def test_verified_asset_can_request_native_repair_without_approving_photo(tmp_path, monkeypatch):
+def test_verified_asset_can_repair_research_without_approving_photo_or_starting_paid_render(tmp_path, monkeypatch):
     from photo_auditor.store import AuditStore
-    from photo_auditor import runtime
+    from photo_auditor import runtime, progress
     from photo_auditor.images import digest
     from photo_auditor.reference_asset import from_audit
     from tests.test_photo_auditor import product, picture, report
@@ -74,10 +90,16 @@ def test_verified_asset_can_request_native_repair_without_approving_photo(tmp_pa
     row = store.submit(product(), picture())
     source = {'id': 1, 'official': True, 'model_image_verified': True,
               'model': product()['model'], 'image_sha256': digest(picture('blue'))}
-    store.finish(store.claim(), {**report('review'), 'sources': [source]})
+    store.finish(store.claim(), {**report('review'), 'sources': [source], 'source_checks': [
+        {'id': 1, 'main_product_visible': True, 'suitable_for_repair': True,
+         'reason': 'Основной товар показан целиком.'}]})
     path = store.root / row['id'] / 'source-1.bin'
     path.write_bytes(picture('blue'))
     monkeypatch.setattr(runtime, '_read', lambda *a: {'mode': 'kbt', 'required': True,
+        'brand': product()['brand'], 'model': product()['model']})
+    assert not store.request_reference_repair(row['id'])
+    progress.save_research(tmp_path, 'fotogen-123', 'Midea', 'ABC-12-RU', 'Verified facts')
+    monkeypatch.setattr(runtime, '_read', lambda *a: {'mode': 'research', 'required': True,
         'brand': product()['brand'], 'model': product()['model']})
     assert store.request_reference_repair(row['id'])
     repaired = store.get(row['id'])

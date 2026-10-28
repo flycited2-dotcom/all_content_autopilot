@@ -58,7 +58,7 @@ def digest(factory, store, now: float) -> tuple[str, list] | None:
     lines = ["🗂 Ждут вашего решения"]
     keyboard = []
     for batch in ready:
-        lines.append(f"📦 Партия «{batch['category']}» готова — кнопка «Опубликовать пачкой» под её сообщением")
+        lines.append(f"📦 Карточки партии «{batch['category']}» ждут решения — кнопка «Опубликовать пачкой» под её сообщением")
     other = tg["fresh"]
     if other:
         lines.append(f"🛒 Свежих товарных превью в группе проверки: {other}")
@@ -106,7 +106,7 @@ def batch_action(deps, chat_id, op: str, log_id: int) -> None:
         return
     now = deps.clock()
     if op == "x":
-        if deps.store.move_batch(log_id, ("ready", "approved"), "closed"):
+        if deps.store.move_batch(log_id, ("open", "ready", "approved"), "closed"):
             deps.tg.send(chat_id, f"Партию «{batch['category']}» не публикую. Превью остались в группе проверки.")
         return
     if batch["publish_at"] and batch["publish_at"] > now:
@@ -160,20 +160,32 @@ def tick(deps, now: float) -> None:
         if status["in_work"]:
             continue                                  # ещё генерируется — ждём всю партию
         if not status["ready"]:
-            if deps.store.move_batch(batch["log_id"], ("open",), "failed"):
+            if status['published'] == status['total'] and status['total']:
+                if deps.store.move_batch(batch['log_id'], ('open',), 'published', expected_updated=batch['updated']):
+                    deps.tg.send(deps.owner_chat_id,
+                        f"📦 Партия «{batch['category']}» уже опубликована: "
+                        f"{status['published']} из {status['total']} карточек. Новая публикация не запускалась.")
+                continue
+            if deps.store.move_batch(batch["log_id"], ("open",), "failed", expected_updated=batch['updated']):
                 from orchestrator_bot.key_commands import readable_errors
                 detail = readable_errors(status.get('errors', []))
                 deps.tg.send(deps.owner_chat_id,
-                    f"⚠️ Партия «{batch['category']}» завершена без готовых превью. "
-                    f"Ошибок или удержаний: {status.get('dropped', 0)}.\n"
+                    f"⚠️ Партия «{batch['category']}» сейчас без готовых превью.\n"
+                    f"Готово к проверке: 0 из {status['total']} карточек. "
+                    f"Уже опубликовано: {status['published']}. Остальные карточки: {status['dropped']}.\n"
                     "Причины — в отчётах фотоаудитора @foto_auditor_bot и статусе Никиты. "
-                    "Публикация не запускалась." + ('\n\n' + detail if detail else ''))
+                    "Новая публикация не запускалась." + ('\n\n' + detail if detail else ''))
             continue
-        deps.store.move_batch(batch["log_id"], ("open",), "ready")
-        extra = f", не вышло {status['dropped']}" if status["dropped"] else ""
+        if not deps.store.move_batch(batch["log_id"], ("open",), "ready", expected_updated=batch['updated']):
+            continue
+        if status['dropped'] or status['published']:
+            summary = (f"📦 В партии «{batch['category']}» готово к проверке: "
+                       f"{status['ready']} из {status['total']} карточек.\n"
+                       f"Уже опубликовано: {status['published']}. Остальные карточки: {status['dropped']}.\n")
+        else:
+            summary = f"📦 Партия «{batch['category']}» готова: {status['ready']} карточек.\n"
         when = _when(batch["publish_at"], now)
         deps.tg.send(deps.owner_chat_id,
-                     f"📦 Партия «{batch['category']}» готова: {status['ready']} карточек{extra}.\n"
-                     f"Посмотреть — в группе проверки @Sendpr1ce_bot. "
+                     summary + "Посмотреть — в группе проверки @Sendpr1ce_bot. "
                      + (f"По вашему плану выход {when}." if when else "Опубликую пачкой по кнопке."),
                      batch_buttons(batch, now))

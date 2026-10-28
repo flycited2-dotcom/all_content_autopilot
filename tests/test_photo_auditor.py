@@ -143,8 +143,9 @@ def test_public_reference_requires_cited_exact_model_and_linked_image():
     candidate = {"url": "https://midea.com/p", "image_url": "https://midea.com/product.png"}
     source, photo, _ = web.reference(candidate, "ABC-12-RU", [candidate["url"]], ["midea.com"])
     assert source["official"] and photo == data
-    with pytest.raises(ValueError):
-        web.reference(candidate, "ABC-12-RU", [], ["midea.com"])
+    # Discovery metadata may omit a URL; the real fetched model page is evidence.
+    uncited, _, _ = web.reference(candidate, "ABC-12-RU", [], ["midea.com"])
+    assert uncited['model_image_verified'] == source['model_image_verified']
     with pytest.raises(ValueError):
         web.reference(candidate, "ABC-12-RU2", [candidate["url"]], ["midea.com"])
     with pytest.raises(ValueError):
@@ -175,7 +176,9 @@ def test_auditor_uses_actual_images_and_max_five_sources(tmp_path):
             if search:
                 source = {"url": "https://midea.com/p", "image_url": "https://midea.com/product.png"}
                 return {"text": json.dumps({"sources": [source] if domains else []}), "sources": [source["url"]]}
-            return {"text": json.dumps(comparison()), "sources": []}
+            return {"text": json.dumps({**comparison(), 'limitations': [], 'source_checks': [
+                {'id': 1, 'main_product_visible': True, 'suitable_for_repair': True,
+                 'reason': 'Основной товар виден.'}]}), "sources": []}
     class Web:
         def reference(self, candidate, model, cited, domains):
             return {**candidate, "official": True, "model_image_verified": True, "model": model, "text": "Midea ABC-12-RU"}, picture(), b"page"

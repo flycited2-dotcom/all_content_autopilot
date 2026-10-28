@@ -6,14 +6,16 @@ from datetime import datetime
 from pathlib import Path
 
 
-def validate(value):
+def validate(value, *, allow_review=False):
+    """allow_review: the advisory auditor passes doubtful photos on to the owner's preview."""
     fields = {'job_id', 'audit_id', 'attempt', 'revision', 'status', 'sha256', 'brand', 'model'}
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError('Неверное сообщение фотоаудита')
     for key, minimum, maximum in [('job_id', 1, 2**63 - 1), ('attempt', 0, 1000), ('revision', 0, 2)]:
         if type(value[key]) is not int or not minimum <= value[key] <= maximum:
             raise ValueError('Неверный номер проверки')
-    if value['status'] not in ('approved', 'regenerate') or (value['revision'] == 2 and value['status'] == 'regenerate'):
+    allowed = ('approved', 'regenerate', 'review') if allow_review else ('approved', 'regenerate')
+    if value['status'] not in allowed or (value['revision'] == 2 and value['status'] == 'regenerate'):
         raise ValueError('Решение не разрешает продолжение')
     for key, pattern in [('audit_id', '[a-f0-9]{32}'), ('sha256', '[a-f0-9]{64}')]:
         if not isinstance(value[key], str) or not re.fullmatch(pattern, value[key]):
@@ -24,7 +26,7 @@ def validate(value):
 
 
 def reconcile(state_path, queue_path, value):
-    value = validate(value)
+    value = validate(value, allow_review=True)
     receipt = value['audit_id'] + ':' + str(value['attempt'])
     # Wrong configuration must not create an empty replacement database.
     state_uri = Path(state_path).resolve().as_uri() + '?mode=rw'

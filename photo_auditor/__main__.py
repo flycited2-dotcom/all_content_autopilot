@@ -11,7 +11,7 @@ from listener.chatgpt_auth import ChatGPTAuth
 from orchestrator_bot.telegram_api import TelegramApi
 from photo_auditor.credentials import SetupError, configure, credentials_path, load
 from photo_auditor.engine import Auditor
-from photo_auditor.service import make_server, process_one, run_bot, worker_loop, watch_parent
+from photo_auditor.service import make_server, process_one, run_bot, worker_loop, watch_parent, start_workers, maintenance_loop
 from photo_auditor.store import AuditStore
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,8 +24,12 @@ def main(argv=None):
     config.add_argument("--console", action="store_true")
     commands.add_parser("status")
     commands.add_parser("run")
+    retry = commands.add_parser('retry', help='Повторить ожидающую проверку того же снимка без генерации')
+    retry.add_argument('audit_id')
     recheck = commands.add_parser('recheck', help='Повторить проверку сохранённого файла без новой генерации')
     recheck.add_argument('audit_id')
+    content_retry = commands.add_parser('retry-content', help='Повторить только содержание при сохранённом одобрении фото')
+    content_retry.add_argument('audit_id')
     check = commands.add_parser("check", help="Проверить локальный файл без отправки в Telegram")
     check.add_argument("image", type=Path)
     check.add_argument("--brand", required=True)
@@ -38,13 +42,20 @@ def main(argv=None):
         print(json.dumps(configure(ROOT, args.console), ensure_ascii=False))
         return 0
     store = AuditStore(ROOT / "runs/photo-auditor")
-    if args.command == 'recheck':
-        accepted = store.recheck(args.audit_id)
+    if args.command == 'retry':
+        accepted = store.retry_waiting(args.audit_id)
+        print(json.dumps({'queued': accepted, 'new_generation': False}))
+        return 0 if accepted else 2
+    if args.command in ('recheck', 'retry-content'):
+        accepted = store.recheck(args.audit_id, content_only=True) if args.command == 'retry-content' else store.recheck(args.audit_id)
         print(json.dumps({'queued': accepted, 'new_generation': False}))
         return 0 if accepted else 2
     if args.command == "status":
         print(json.dumps({"bot_configured": credentials_path(ROOT).is_file(), "jobs": store.status(),
-                          "chatgpt_connected": ChatGPTAuth(ROOT).ready()}, ensure_ascii=False))
+                          "chatgpt_connected": ChatGPTAuth(ROOT).ready(),
+                          "connection_route": "oauth_responses", "generator_availability": "not_checked",
+                          "waiting": [{k: row[k] for k in ('id', 'product', 'provider_error', 'retry_at')}
+                                      for row in store.waiting()]}, ensure_ascii=False))
         return 0
     auditor = Auditor(ROOT, ChatGPTProvider(ChatGPTAuth(ROOT)))
     if args.command == "check":
@@ -75,10 +86,13 @@ def main(argv=None):
     stop = threading.Event()
     threading.Thread(target=watch_parent, args=(os.getppid(), stop), daemon=True).start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    threading.Thread(target=worker_loop, args=(store, auditor, stop), daemon=True).start()
+    start_workers(store, lambda: Auditor(ROOT, ChatGPTProvider(ChatGPTAuth(ROOT))), stop,
+                  count=int(os.environ.get('PHOTO_AUDIT_WORKERS', '2')))
     tg = TelegramApi(config["bot_token"])
+    owner=int(os.environ.get('PHOTO_AUDIT_OWNER','1264067528'))
+    threading.Thread(target=maintenance_loop,args=(store,tg,owner,stop),daemon=True).start()
     try:
-        run_bot(store, tg, int(os.environ.get("PHOTO_AUDIT_OWNER", "1264067528")), stop)
+        run_bot(store, tg, owner, stop)
     except KeyboardInterrupt:
         pass
     finally:

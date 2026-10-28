@@ -114,6 +114,22 @@ def test_photo_recovery_requires_auth_and_validates_before_factory(server):
     assert calls == [event()]
 
 
+def test_duplicate_photo_recovery_does_not_reopen_a_reviewed_partial_batch_again(server):
+    from tests.test_photo_recovery import event
+    store, factory, _, base = server
+    key = 'excel|jvc|jk-mg123'
+    store.add_batch(18, 'мясорубки', [key], None)
+    store.move_batch(18, ('open',), 'ready')
+    result = {'handled': True, 'resumed': True, 'item_key': key}
+    factory.reconcile_photo = lambda payload: result
+    _call(base, 'POST', '/photo-audit-result', event())
+    assert store.get_batch(18)['status'] == 'open'
+    store.move_batch(18, ('open',), 'ready')
+    result['duplicate'] = True
+    _call(base, 'POST', '/photo-audit-result', event())
+    assert store.get_batch(18)['status'] == 'ready'
+
+
 def test_health_check_never_claims_or_executes_a_waiting_message(server):
     store, factory, sent, base = server
     store.add_message(998, 'text', 'поставь холодильники')
@@ -298,3 +314,14 @@ def test_empty_catalog_does_not_enqueue(server):
     _call(base, "POST", "/intent", {"message_id": msg, "intent": {
         "reply": "", "actions": [{"type": "list_products", "category": "холодильники"}]}})
     assert "Нет доступных" in sent[-1][0] and factory.enqueued == []
+
+
+def test_authenticated_photo_publication_route_preserves_exact_decision(server):
+    from tests.test_photo_recovery import event
+    _,factory,_,base=server;calls=[]
+    factory.publish_audited=lambda value: calls.append(value) or {'handled':False,'published':False}
+    assert _call(base,'POST','/photo-audit-publish',event())=={'handled':False,'published':False}
+    assert calls==[event()]
+    with pytest.raises(urllib.error.HTTPError) as error:
+        _call(base,'POST','/photo-audit-publish',event(),token='wrong')
+    assert error.value.code==401 and len(calls)==1

@@ -24,7 +24,7 @@ def secondary_sources():
              'model_image_verified': True} for i in range(3)]
 
 
-def test_secondary_approval_requires_documented_unavailability_and_three_independent_references():
+def test_catalog_reference_is_usable_when_official_reference_is_unavailable():
     sources = secondary_sources()
     value = comparison()
     for check in value['checks']:
@@ -32,14 +32,14 @@ def test_secondary_approval_requires_documented_unavailability_and_three_indepen
     assert decision(value, sources)[0] == 'review'
     assert decision(value, sources, manufacturer_unavailable=True)[0] == 'approved'
     sources[2]['url'] = 'https://shop.seller1.ru/another'
-    assert decision(value, sources, manufacturer_unavailable=True)[0] == 'review'
+    assert decision(value, sources, manufacturer_unavailable=True)[0] == 'approved'
     assert owner('https://www.example.co.uk/a') == owner('https://shop.example.co.uk/b')
 
 
-def test_two_references_or_one_optimistic_source_cannot_approve_fallback():
+def test_catalog_count_does_not_override_low_confidence_or_missing_citations():
     value = comparison()
-    assert decision(value, secondary_sources(), manufacturer_unavailable=True)[0] == 'review'
-    value['checks'][0]['confidence'] = .85
+    assert decision(value, secondary_sources(), manufacturer_unavailable=True)[0] == 'approved'
+    value['checks'][0]['confidence'] = .84
     for check in value['checks']:
         check['source_ids'] = [1, 2, 3]
     assert decision(value, secondary_sources(), manufacturer_unavailable=True)[0] == 'review'

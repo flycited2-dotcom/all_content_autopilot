@@ -10,6 +10,30 @@ from PIL import Image
 from listener.pending import write_json
 from photo_auditor.images import digest, image_bytes
 
+RESEARCH_OPERATION = 'verified_source_download'
+
+
+def _require_research_scope(root, product_id, brand, model):
+    from photo_auditor.integration import AuditHold
+    from photo_auditor.runtime import _read
+    match = re.fullmatch(r'fotogen-([1-9][0-9]*)', product_id)
+    if not match:
+        raise AuditHold('Поиск не связан с товарным заданием')
+    scope = _read(root, int(match[1]))
+    identity = lambda b, m: (b.strip().casefold(), m.strip().casefold())
+    if (scope.get('mode') != 'research' or not scope.get('required') or scope.get('editorial') or
+            identity(scope.get('brand', ''), scope.get('model', '')) != identity(brand, model)):
+        raise AuditHold('Контрольная точка поиска не соответствует области задания')
+
+
+def start_research(root, product_id, brand, model, revision=0):
+    """Search and download existing product evidence; never submit an image render."""
+    if type(revision) is not int or not 0 <= revision <= 2:
+        raise ValueError('Неверная ревизия поиска')
+    _require_research_scope(root, product_id, brand, model)
+    write_json(folder(root, product_id) / 'state.json', {
+        'product_id': product_id, 'brand': brand, 'model': model, 'revision': revision,
+        'phase': 'researching', 'operation': RESEARCH_OPERATION})
 
 def folder(root, product_id):
     if not isinstance(product_id, str) or not re.fullmatch('[A-Za-z0-9_-]{1,100}', product_id):
@@ -116,7 +140,7 @@ def _restore(root, product_id, brand, model):
     path = folder(root, product_id)
     state = json.loads((path / 'state.json').read_text(encoding='utf-8')) if (path / 'state.json').exists() else None
     if state is not None and (not isinstance(state, dict) or
-            state.get('phase') not in ('generating', 'composing', 'generated', 'rejected') or
+            state.get('phase') not in ('generating', 'composing', 'generated', 'rejected', 'researching') or
             type(state.get('revision')) is not int or not 0 <= state['revision'] <= 2):
         raise AuditHold('Неверная контрольная точка; повторная генерация остановлена')
     database = Path(root) / 'runs/photo-auditor/audit.sqlite3'
@@ -126,6 +150,12 @@ def _restore(root, product_id, brand, model):
     for value in (state, latest['product'] if latest else None):
         if value and (value.get('product_id') != product_id or identity(value['brand'], value['model']) != expected):
             raise AuditHold('Изменилась номенклатура при восстановлении')
+    if state and state['phase'] == 'researching':
+        if state.get('operation') != RESEARCH_OPERATION:
+            raise AuditHold('Не подтверждена операция поиска исходника')
+        _require_research_scope(root, product_id, brand, model)
+        if latest is None:
+            return None  # Repeating a source lookup cannot duplicate an unknown image render.
     if state and state['phase'] == 'rejected' and latest is None:
         return None
     if state and state['phase'] == 'composing' and latest is None:

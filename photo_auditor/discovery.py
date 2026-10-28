@@ -27,7 +27,7 @@ def collect(product, domains, research, web, folder):
     scopes = ([domains] if direct else []) + ([domains, (), (), ()] if domains else [(), (), ()])
     for index, scope in enumerate(scopes):
         if index and (any(s['official'] and s.get('model_image_verified') for s in sources) or
-                      len({owner(s['url']) for s in sources if s.get('model_image_verified')}) >= 3):
+                      any(s.get('model_image_verified') for s in sources)):
             break
         remaining = 5 - len(sources)
         if not remaining:

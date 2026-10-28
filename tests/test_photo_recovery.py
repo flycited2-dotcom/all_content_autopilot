@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from orchestrator_bot.photo_recovery import reconcile
-from photo_auditor import integration, progress, service
+from photo_auditor import integration, progress, service, runtime
 from photo_auditor.research import SourceUnavailable, search_product
 from photo_auditor.store import AuditStore
 from tests.test_photo_auditor import picture, product, report
@@ -35,11 +35,14 @@ def test_recheck_keeps_snapshot_history_revision_and_latest_only(tmp_path):
     store.finish(store.claim(), report('review'))
     folder = tmp_path / row['id']
     (folder / 'source-1.html').write_text('previous evidence')
+    (folder / 'visual-checkpoint.json').write_text('previous signed visual stage')
     assert store.recheck(row['id'])
     assert not store.recheck(row['id'])
     assert store.latest(product()['product_id'])['revision'] == 1
     assert (folder / 'generated.bin').read_bytes() == picture('black')
     assert list((folder / 'history').glob('*/source-1.html'))
+    assert list((folder / 'history').glob('*/visual-checkpoint.json'))
+    assert not (folder / 'visual-checkpoint.json').exists()
     store.finish(store.claim(), report('approved'))
     results = store.recovery_results()
     assert len(results) == 1 and results[0]['attempt'] == 1
@@ -93,6 +96,11 @@ def test_interrupted_native_layout_can_be_composed_again_without_paid_call(tmp_p
 
 def test_checked_output_resumes_revision_without_initial_regeneration(tmp_path, monkeypatch):
     monkeypatch.setattr(integration, 'load', lambda root: {'api_token': 'test'})
+    monkeypatch.setattr(runtime, 'load', lambda root: {'api_token': 'test'})
+    runtime.register_job(tmp_path, 123, 'kbt', 'Midea', 'ABC-12-RU', '')
+    reviewed = {**report('approved'), 'content_review': {'verdict': 'approved',
+        'policy_version': runtime.CONTENT_POLICY,
+        'brief_sha256': runtime.brief_digest(runtime.content_brief(tmp_path, product()))}}
     photo = tmp_path / 'photo.png'
     photo.write_bytes(picture())
     requests = []
@@ -100,7 +108,7 @@ def test_checked_output_resumes_revision_without_initial_regeneration(tmp_path, 
         payload = json.loads(request.content)
         requests.append(payload['product']['revision'])
         return httpx.Response(200, json={'id': 'a' * 32, 'status': 'approved',
-            'sha256': integration.digest(picture()), 'product': payload['product']})
+            'sha256': integration.digest(picture()), 'product': payload['product'], 'report': reviewed})
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
             async def forbidden(_):
@@ -159,10 +167,14 @@ def test_server_rejects_identity_substitution_and_unrelated_failures(tmp_path):
     assert not (tmp_path / 'missing.db').exists()
 
 
-def test_delivery_retries_after_network_loss_then_saves_receipt(tmp_path):
-    store = AuditStore(tmp_path)
+def test_delivery_retries_after_network_loss_then_saves_receipt(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, 'load', lambda root: {'api_token': 'test'})
+    runtime.register_job(tmp_path, 123, 'kbt', 'Midea', 'ABC-12-RU', '')
+    store = AuditStore(tmp_path / 'runs/photo-auditor')
     store.submit(product(), picture())
-    store.finish(store.claim(), report('approved'))
+    store.finish(store.claim(), {**report('approved'), 'content_review': {'verdict': 'approved',
+        'policy_version': runtime.CONTENT_POLICY,
+        'brief_sha256': runtime.brief_digest(runtime.content_brief(tmp_path, product()))}})
     calls = []
     def deliver(payload):
         calls.append(payload)

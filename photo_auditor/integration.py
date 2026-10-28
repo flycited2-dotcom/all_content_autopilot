@@ -29,18 +29,41 @@ def _permit(root, product_id, fingerprint):
     return Path(root) / "runs/photo-auditor/permits" / (key + ".json")
 
 
+def _sign(root, payload):
+    return hmac.new(load(root)["api_token"].encode(), json.dumps(payload, sort_keys=True).encode(), hashlib.sha256).hexdigest()
+
+
+def _release(root, product_id, fingerprint, reason):
+    """Advisory mode: the exact file goes on to the owner's preview with the auditor's notes."""
+    payload = {"product_id": product_id, "sha256": fingerprint, "advisory": True}
+    write_json(_permit(root, product_id, fingerprint), {"payload": payload, "signature": _sign(root, payload),
+                                                       "reason": str(reason)[:500]})
+
+
+def released(root, product_id, fingerprint):
+    """True when this exact file was already passed on in advisory mode."""
+    payload = {"product_id": product_id, "sha256": fingerprint, "advisory": True}
+    try:
+        value = json.loads(_permit(root, product_id, fingerprint).read_text(encoding="utf-8"))
+        return value["payload"] == payload and hmac.compare_digest(value["signature"], _sign(root, payload))
+    except (OSError, KeyError, ValueError, TypeError):
+        return False
+
+
 def require_permit(root, product_id, path):
     """Also gates retries from the photo agent's durable upload outbox."""
     fingerprint = digest(Path(path).read_bytes())
     payload = {"product_id": product_id, "sha256": fingerprint}
-    signature = hmac.new(load(root)["api_token"].encode(), json.dumps(payload, sort_keys=True).encode(), hashlib.sha256).hexdigest()
     try:
         value = json.loads(_permit(root, product_id, fingerprint).read_text(encoding="utf-8"))
-        if value["payload"] == payload and hmac.compare_digest(value["signature"], signature):
+        if value["payload"] == payload and hmac.compare_digest(value["signature"], _sign(root, payload)):
             if _current_approval(root, product_id, fingerprint):
                 return
     except (OSError, KeyError, ValueError, TypeError):
         pass
+    from photo_auditor.mode import advisory
+    if advisory(root) and released(root, product_id, fingerprint):
+        return
     raise AuditHold("Нет подтверждения контроля именно этого файла; выгрузка остановлена")
 
 
@@ -48,10 +71,12 @@ def _current_approval(root, product_id, fingerprint):
     database = Path(root) / 'runs/photo-auditor/audit.sqlite3'
     try:
         with sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True, timeout=10) as db:
-            row = db.execute('SELECT status,sha256 FROM audits WHERE product_id=? ORDER BY revision DESC LIMIT 1',
+            row = db.execute('SELECT status,sha256,product,report FROM audits WHERE product_id=? ORDER BY revision DESC LIMIT 1',
                              (product_id,)).fetchone()
-        return bool(row and row[0] == 'approved' and row[1] == fingerprint)
-    except sqlite3.Error:
+        from photo_auditor.runtime import approval_covers_brief
+        return bool(row and row[0] == 'approved' and row[1] == fingerprint and
+                    approval_covers_brief(root, json.loads(row[2]), json.loads(row[3]) if row[3] else None))
+    except (sqlite3.Error, ValueError, TypeError, KeyError):
         return False
 
 
@@ -64,16 +89,32 @@ async def checked_output(root, product_id, brand, model, generated_path, supplie
     if type(start_revision) is not int or not 0 <= start_revision <= MAX_REGENERATIONS:
         raise AuditHold('Неверная ревизия восстановления')
     from photo_auditor import progress
+    from photo_auditor.mode import settings
+    mode = settings(root)
+    advisory = mode['mode'] == 'advisory'
+    # The auditor helps the factory: in advisory mode only a confirmed discrepancy
+    # may delay the file (bounded repairs); anything else passes on with notes.
+    repairs = min(mode['repairs'], MAX_REGENERATIONS) if advisory else MAX_REGENERATIONS
+    if advisory:
+        timeout = min(timeout, mode['wait_seconds'])
     headers = {"X-Audit-Token": config["api_token"]}
     original = image_bytes(Path(supplier_path).read_bytes()) if supplier_path else None
     path = Path(generated_path)
     owns = client is None
     http = client or httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False)
     deadline = time.monotonic() + timeout
+    fingerprint = None
+
+    def hold_or_release(reason):
+        if not advisory or fingerprint is None or digest(path.read_bytes()) != fingerprint:
+            raise AuditHold(reason)
+        _release(root, product_id, fingerprint, reason)
+        return path
+
     try:
         for revision in range(start_revision, MAX_REGENERATIONS + 1):
             if time.monotonic() >= deadline:
-                raise AuditHold("Контроль ещё не завершён; общий срок проверки и исправлений исчерпан")
+                return hold_or_release("Контроль ещё не завершён; общий срок проверки и исправлений исчерпан")
             data = image_bytes(path.read_bytes())
             fingerprint = digest(data)
             progress.generated(root, product_id, brand, model, revision, path, supplier=supplier_path)
@@ -85,8 +126,13 @@ async def checked_output(root, product_id, brand, model, generated_path, supplie
             response.raise_for_status()
             result = response.json()
             while result["status"] in ("queued", "checking", "waiting_provider"):
+                if advisory and result["status"] == "waiting_provider":
+                    # The audit resumes by itself; its report reaches the owner's bot later.
+                    if result["sha256"] != fingerprint or result["product"] != product:
+                        raise AuditHold("Результат проверки относится к другому снимку/товару")
+                    return hold_or_release("Подключение аудитора ждёт восстановления; проверка продолжится в фоне")
                 if time.monotonic() >= deadline:
-                    raise AuditHold("Контроль ещё не завершён; результат не выгружен")
+                    return hold_or_release("Контроль ещё не завершён; результат не выгружен")
                 await asyncio.sleep(interval)
                 response = await http.get(url + "/audits/" + result["id"], headers=headers)
                 response.raise_for_status()
@@ -94,27 +140,25 @@ async def checked_output(root, product_id, brand, model, generated_path, supplie
             if result["sha256"] != fingerprint or result["product"] != product or digest(path.read_bytes()) != fingerprint:
                 raise AuditHold("Результат проверки относится к другому снимку/товару")
             if result["status"] == "approved":
+                from photo_auditor.runtime import approval_covers_brief
+                if not approval_covers_brief(root, product, result.get('report')):
+                    return hold_or_release('Проверка текста и оформления этого задания ещё не завершена')
                 payload = {"product_id": product_id, "sha256": fingerprint}
-                signature = hmac.new(config["api_token"].encode(), json.dumps(payload, sort_keys=True).encode(), hashlib.sha256).hexdigest()
-                write_json(_permit(root, product_id, fingerprint), {"payload": payload, "signature": signature})
+                write_json(_permit(root, product_id, fingerprint), {"payload": payload, "signature": _sign(root, payload)})
                 return path
-            if result['status'] == 'review' and repair_reference and revision < MAX_REGENERATIONS:
-                from photo_auditor.store import AuditStore
-                store = AuditStore(Path(root) / 'runs/photo-auditor')
-                if store.request_reference_repair(result['id']):
-                    response = await http.get(url + '/audits/' + result['id'], headers=headers)
-                    response.raise_for_status()
-                    result = response.json()
-                    if result['sha256'] != fingerprint or result['product'] != product:
-                        raise AuditHold('Изменился снимок при подготовке официального исходника')
-            if result["status"] != "regenerate" or revision >= MAX_REGENERATIONS:
-                raise AuditHold("Фото остановлено для ручной проверки: " + result["id"][:12])
+            # Inconclusive evidence is not a request to redraw or replace the product.
+            # Only a confirmed discrepancy (regenerate) may invoke the repair callback.
+            if result["status"] != "regenerate" or revision >= repairs:
+                return hold_or_release("Фото остановлено для ручной проверки: " + result["id"][:12])
             if time.monotonic() >= deadline:
-                raise AuditHold("Контроль ещё не завершён; повторная генерация не запускалась")
+                return hold_or_release("Контроль ещё не завершён; повторная генерация не запускалась")
             progress.starting(root, product_id, brand, model, revision + 1, paid=not repair_reference)
             path = Path(await regenerate(result["feedback"]))
-        raise AuditHold("Исчерпан лимит исправлений")
+            fingerprint = None
+        return hold_or_release("Исчерпан лимит исправлений")
     except httpx.HTTPError:
+        if advisory and fingerprint is not None:
+            return hold_or_release("Служба контроля недоступна; фото передано без проверки")
         raise AuditHold("Служба контроля недоступна; фото не выгружено") from None
     finally:
         if owns:
