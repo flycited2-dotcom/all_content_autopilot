@@ -11,6 +11,8 @@ $ErrorActionPreference = 'Stop'
 $branch = 'codex/photo-audit-agent-ffrkpl'
 $target = "origin/$branch"
 $root = Split-Path -Parent $PSScriptRoot
+$gitExe = (Get-Command git -CommandType Application).Source
+function git { & $gitExe -c "safe.directory=$root" @args }
 Push-Location $root
 try {
     git fetch origin $branch
@@ -30,7 +32,9 @@ try {
     $backup = Join-Path $root "runs/backups/before-advisory-$stamp"
     New-Item -ItemType Directory -Force -Path $backup | Out-Null
     git rev-parse HEAD | Set-Content -Encoding ascii -LiteralPath (Join-Path $backup 'HEAD.txt')
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось сохранить исходный HEAD; переключение отменено' }
     $stashCommit = git stash create
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось создать резерв локальных tracked-правок; переключение отменено' }
     if ($stashCommit) {
         git stash store -m "before-advisory-$stamp" $stashCommit
         if ($LASTEXITCODE -ne 0) { throw 'Не удалось сохранить локальные изменения' }
