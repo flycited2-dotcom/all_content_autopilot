@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from listener.provider_errors import ProviderError
 from listener.intent_validation import validated_intent
+from listener.attachments import materialize_images
 
 log = logging.getLogger("listener")
 
@@ -130,9 +131,15 @@ def complete_turn(payload: dict, session: tuple[str, bool], runner=run_with_kill
     chat_dir = root / "runs" / "chat"
     chat_dir.mkdir(parents=True, exist_ok=True)
     msg_id = payload["message"]["id"]
-    (chat_dir / f"{msg_id}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     try:
-        proc = run_claude(f"/chat-turn runs/chat/{msg_id}.json", session, runner, root)
+        if type(msg_id) is not int or msg_id < 1:
+            raise ValueError("Неверный номер сообщения")
+        prepared = materialize_images(payload, root)
+        (chat_dir / f"{msg_id}.json").write_text(json.dumps(prepared, ensure_ascii=False), encoding="utf-8")
+        # A slow vision call must yield to the connected reserve instead of
+        # keeping the Telegram photo waiting for the ordinary ten-minute limit.
+        timeout = 60 if prepared["message"].get("attachments") else 600
+        proc = run_claude(f"/chat-turn runs/chat/{msg_id}.json", session, runner, root, timeout=timeout)
         error = claude_error(proc)
         if error:
             raise error

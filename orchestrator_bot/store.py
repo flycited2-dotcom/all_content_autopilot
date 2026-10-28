@@ -1,12 +1,18 @@
 """SQLite-хранилище оркестратора: очередь сообщений, журнал действий, вопросы, мета."""
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import sqlite3
 import time
 from pathlib import Path
 
 CLAIM_TIMEOUT = 600          # слушатель забрал и пропал — через 10 минут сообщение снова в очереди
+ALBUM_QUIET_SECONDS = 2
+ALBUM_MAX_IMAGES = 8
+ALBUM_MAX_BYTES = 20 * 1024 * 1024
+ALBUM_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -14,6 +20,8 @@ CREATE TABLE IF NOT EXISTS messages (
     status TEXT NOT NULL DEFAULT 'new', created REAL, claimed_at REAL,
     intent_done INTEGER NOT NULL DEFAULT 0, response TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_messages_tg ON messages(tg_message_id) WHERE tg_message_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS message_aliases (
+    tg_message_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS actions_log (
     id INTEGER PRIMARY KEY, msg_id INTEGER, kind TEXT, payload TEXT, result TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS asks (
@@ -29,7 +37,9 @@ CREATE TABLE IF NOT EXISTS drafts (
 """
 DRAFT_FIELDS = ("image_job", "image_path", "status", "control_message_id", "result", "visual_prompt", "final_text",
                 "publish_at")
-_MIGRATIONS = ("ALTER TABLE drafts ADD COLUMN final_text TEXT", "ALTER TABLE drafts ADD COLUMN publish_at REAL")
+_MIGRATIONS = ("ALTER TABLE drafts ADD COLUMN final_text TEXT", "ALTER TABLE drafts ADD COLUMN publish_at REAL",
+               "ALTER TABLE messages ADD COLUMN attachments TEXT",
+               "ALTER TABLE messages ADD COLUMN media_group_id TEXT")
 
 
 class Store:
@@ -50,16 +60,97 @@ class Store:
         return _Closing(db)
 
     # ── очередь ──
-    def add_message(self, tg_message_id, kind, text, now=None) -> int | None:
+    def add_message(self, tg_message_id, kind, text, now=None, attachments=None) -> int | None:
         """None — это сообщение Telegram уже в очереди (повторная доставка после перезапуска)."""
         with self._c() as db:
-            cur = db.execute("INSERT OR IGNORE INTO messages(tg_message_id, kind, text, created) VALUES(?,?,?,?)",
-                             (tg_message_id, kind, text, now or time.time()))
+            cur = db.execute("INSERT OR IGNORE INTO messages(tg_message_id, kind, text, created, attachments) VALUES(?,?,?,?,?)",
+                             (tg_message_id, kind, text, now or time.time(),
+                              json.dumps(attachments, ensure_ascii=False) if attachments else None))
             return cur.lastrowid if cur.rowcount == 1 else None
 
     def has_tg_message(self, tg_message_id) -> bool:
         with self._c() as db:
-            return db.execute("SELECT 1 FROM messages WHERE tg_message_id=?", (tg_message_id,)).fetchone() is not None
+            return db.execute("SELECT 1 FROM messages WHERE tg_message_id=? UNION ALL "
+                              "SELECT 1 FROM message_aliases WHERE tg_message_id=? LIMIT 1",
+                              (tg_message_id, tg_message_id)).fetchone() is not None
+
+    def add_photo_message(self, tg_message_id, text, attachment, media_group_id=None, now=None):
+        """Durably collect a Telegram album; (id, created) or None on redelivery."""
+        if not media_group_id:
+            msg_id = self.add_message(tg_message_id, "photo", text, now=now, attachments=[attachment])
+            return (msg_id, True) if msg_id is not None else None
+        now = time.time() if now is None else now
+        group = str(media_group_id)
+        with self._c() as db:
+            db.execute("BEGIN IMMEDIATE")
+            duplicate = db.execute("SELECT 1 FROM messages WHERE tg_message_id=? UNION ALL "
+                                   "SELECT 1 FROM message_aliases WHERE tg_message_id=? LIMIT 1",
+                                   (tg_message_id, tg_message_id)).fetchone()
+            if duplicate:
+                db.execute("COMMIT")
+                return None
+            row = db.execute("SELECT * FROM messages WHERE media_group_id=? "
+                             "AND status='collecting' AND intent_done=0 ORDER BY id DESC LIMIT 1",
+                             (group,)).fetchone()
+            attachments = json.loads(row["attachments"]) if row else []
+            attachments.append(attachment)
+            _validate_album(attachments)
+            encoded = json.dumps(attachments, ensure_ascii=False)
+            if row:
+                old_text = row["text"] or ""
+                if old_text == "Фотография поставщика":
+                    combined = text
+                elif text and text != "Фотография поставщика" and text not in old_text.split("\n"):
+                    combined = old_text + "\n" + text
+                else:
+                    combined = old_text
+                if len(combined) > 10000:
+                    raise ValueError("Слишком длинные подписи к альбому — максимум 10000 символов")
+                msg_id = row["id"]
+                db.execute("UPDATE messages SET attachments=?,text=?,status='collecting',claimed_at=? WHERE id=?",
+                           (encoded, combined, now, msg_id))
+            else:
+                msg_id = db.execute("INSERT INTO messages(tg_message_id,kind,text,status,created,claimed_at,"
+                                    "attachments,media_group_id) VALUES(?,'photo',?,'collecting',?,?,?,?)",
+                                    (tg_message_id, text, now, now, encoded, group)).lastrowid
+            db.execute("INSERT INTO message_aliases(tg_message_id,message_id) VALUES(?,?)", (tg_message_id, msg_id))
+            db.execute("COMMIT")
+        return msg_id, row is None
+
+    def get_message(self, msg_id) -> dict | None:
+        """Read the original durable message when validating a model action."""
+        with self._c() as db:
+            row = db.execute("SELECT * FROM messages WHERE id=?", (msg_id,)).fetchone()
+        if not row:
+            return None
+        message = {k: row[k] for k in ("id", "tg_message_id", "kind", "text", "created")}
+        if row["attachments"]:
+            message["attachments"] = json.loads(row["attachments"])
+        if row["media_group_id"]:
+            message["media_group_id"] = row["media_group_id"]
+        return message
+
+    def recent_photo_attachments(self, before_id, limit=3, max_age=1800) -> list[dict]:
+        """Recent photos can precede an instruction; never use later or stale images."""
+        current = self.get_message(before_id)
+        if current is None or limit <= 0 or max_age <= 0:
+            return []
+        with self._c() as db:
+            rows = db.execute("SELECT id,attachments FROM messages WHERE id < ? AND kind='photo' "
+                              "AND attachments IS NOT NULL AND created >= ? AND created <= ? "
+                              "ORDER BY id DESC LIMIT ?",
+                              (before_id, current["created"] - max_age, current["created"], limit)).fetchall()
+        groups, count, size = [], 0, 0
+        for row in rows:
+            group = [{**attachment, "source_message_id": row["id"]}
+                     for attachment in json.loads(row["attachments"])]
+            group_size = sum(len(a.get("data", "")) * 3 // 4 for a in group)
+            if count + len(group) > min(limit, 8) or size + group_size > 20 * 1024 * 1024:
+                break  # Keep whole recent albums; never silently cut an album in half.
+            groups.append(group)
+            count += len(group)
+            size += group_size
+        return [attachment for group in reversed(groups) for attachment in group]
 
     def save_response(self, msg_id, response: dict):
         with self._c() as db:
@@ -100,11 +191,22 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             db.execute("UPDATE messages SET status='new' WHERE status='claimed' AND claimed_at < ?",
                        (now - CLAIM_TIMEOUT,))
-            row = db.execute("SELECT * FROM messages WHERE status='new' ORDER BY id LIMIT 1").fetchone()
+            db.execute("UPDATE messages SET status='new' WHERE status='collecting' AND claimed_at <= ?",
+                       (now - ALBUM_QUIET_SECONDS,))
+            row = db.execute("SELECT * FROM messages WHERE status IN ('new','collecting') ORDER BY id LIMIT 1").fetchone()
+            if row and row["status"] == "collecting":
+                row = None  # Keep a following instruction behind its unfinished album.
             if row:
                 db.execute("UPDATE messages SET status='claimed', claimed_at=? WHERE id=?", (now, row["id"]))
             db.execute("COMMIT")
-        return {k: row[k] for k in ("id", "tg_message_id", "kind", "text", "created")} if row else None
+        if not row:
+            return None
+        message = {k: row[k] for k in ("id", "tg_message_id", "kind", "text", "created")}
+        if row["attachments"]:
+            message["attachments"] = json.loads(row["attachments"])
+        if row["media_group_id"]:
+            message["media_group_id"] = row["media_group_id"]
+        return message
 
     def mark_done(self, msg_id):
         with self._c() as db:
@@ -112,7 +214,7 @@ class Store:
 
     def count_new(self) -> int:
         with self._c() as db:
-            return db.execute("SELECT COUNT(*) FROM messages WHERE status IN ('new','claimed')").fetchone()[0]
+            return db.execute("SELECT COUNT(*) FROM messages WHERE status IN ('new','claimed','collecting')").fetchone()[0]
 
     def intent_seen(self, msg_id) -> bool:
         with self._c() as db:
@@ -141,6 +243,16 @@ class Store:
         with self._c() as db:
             rows = db.execute("SELECT * FROM actions_log WHERE ts >= ? ORDER BY id", (ts,)).fetchall()
         return [_log_row(r) for r in rows]
+
+    def find_supplier_selection(self, msg_id, action, manifest_path) -> dict | None:
+        with self._c() as db:
+            rows = db.execute("SELECT * FROM actions_log WHERE msg_id=? AND kind='enqueue' ORDER BY id DESC",
+                              (msg_id,)).fetchall()
+        for row in rows:
+            entry = _log_row(row)
+            if entry["payload"] == action and entry["result"].get("manifest_path") == manifest_path:
+                return entry
+        return None
 
     # ── вопросы с кнопками ──
     def save_ask(self, msg_id, action: dict, options: list[str]) -> int:
@@ -281,6 +393,26 @@ class Store:
             db.executemany("UPDATE drafts SET status='superseded', updated=? WHERE n=?",
                            [(now or time.time(), n) for n in rows])
         return rows
+
+
+def _validate_album(attachments):
+    if len(attachments) > ALBUM_MAX_IMAGES:
+        raise ValueError("В одном альбоме можно обработать максимум 8 фотографий")
+    total, total_encoded = 0, 0
+    for attachment in attachments:
+        encoded = attachment.get("data")
+        if not isinstance(encoded, str) or len(encoded) > ((ALBUM_IMAGE_MAX_BYTES + 2) // 3) * 4:
+            raise ValueError("Фотография слишком большая — максимум 10 МБ")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError("Повреждены данные фотографии") from None
+        if not data or len(data) > ALBUM_IMAGE_MAX_BYTES:
+            raise ValueError("Фотография слишком большая — максимум 10 МБ")
+        total += len(data)
+        total_encoded += len(encoded)
+    if total > ALBUM_MAX_BYTES or total_encoded > ((ALBUM_MAX_BYTES + 2 * ALBUM_MAX_IMAGES) // 3) * 4:
+        raise ValueError("Общий размер фотографий в альбоме — максимум 20 МБ")
 
 
 def _log_row(row) -> dict:

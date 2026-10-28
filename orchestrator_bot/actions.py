@@ -11,8 +11,30 @@ def _names(items, limit=10) -> str:
     return "".join(f"\n— {n}" for n in names) + more
 
 
-def execute(outcome: Outcome, factory, store, msg_id) -> Result:
+def execute(outcome: Outcome, factory, store, msg_id, *, source_suffix="") -> Result:
     kind = outcome.kind
+    if kind == "enqueue_supplier_products":
+        import hashlib
+        import json
+        from orchestrator_bot.supplier_import import normalize_action, source_message, validate_source
+        action = normalize_action(outcome.action)
+        message = source_message(store, msg_id)
+        images = validate_source(action, message)
+        digest = hashlib.sha256(json.dumps(action, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        result = factory.enqueue_supplier(action, f"telegram:{msg_id}:{digest}{source_suffix}", images)
+        accepted = result.get("accepted") or []
+        if not accepted:
+            return Result(outcome, "ℹ️ Новых позиций из прайса нет: товары уже в работе либо отсутствуют в наличии.")
+        # Use the same batch/cancel/publication controls as catalog products.
+        existing = store.find_supplier_selection(msg_id, action, result.get("manifest_path"))
+        log_id = existing["id"] if existing else store.log_action(msg_id, "enqueue", action, result)
+        store.add_batch(log_id, action["category"], accepted, feed.publish_at(action))
+        lines = [f"✅ Из прайса поставлено в генерацию: {len(accepted)} поз.; наценка {action['markup_percent']}%."]
+        for row in result.get("items") or []:
+            lines.append(f"— {row['brand']} {row['model']}: {row['cost_price']} ₽ + {action['markup_percent']}% → {row['price']} ₽; остаток {row['stock']}")
+        if action.get("at"):
+            lines.append(f"Выход пачкой: {due_text(action)}.")
+        return Result(outcome, "\n".join(lines), log_id=log_id)
     if kind == 'choose_products':
         from orchestrator_bot.selection_ui import open_selection
         text, buttons = open_selection(store, factory, msg_id, outcome.action)
@@ -86,7 +108,12 @@ def restore_logged(log_ref, factory, store) -> Result:
     if not entry or entry["kind"] != "enqueue":
         return Result(Outcome("not_found", {}, ""), "❌ Не нашёл, что вернуть")
     action = entry["payload"]
-    return execute(Outcome("enqueue", action, action.get("category", "")), factory, store, entry["msg_id"])
+    kind = "enqueue_supplier_products" if action.get("type") == "enqueue_supplier_products" else "enqueue"
+    if kind == "enqueue_supplier_products":
+        import time
+        return execute(Outcome(kind, action, action.get("category", "")), factory, store, entry["msg_id"],
+                       source_suffix=f":restore:{time.time_ns()}")
+    return execute(Outcome(kind, action, action.get("category", "")), factory, store, entry["msg_id"])
 
 
 _NOT_CANCELLED = {

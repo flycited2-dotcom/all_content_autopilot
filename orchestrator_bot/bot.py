@@ -1,6 +1,7 @@
 """Telegram-бот оркестратора: приём сообщений владельца, голос, кнопки, режим без ПК."""
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -121,11 +122,16 @@ def _report(deps, chat_id):
     deps.tg.send(chat_id, deps.report_fn() if deps.report_fn else "Сводка пока недоступна")
 
 
-def _with_reply_context(message: dict, text: str) -> str:
+def _with_reply_context(message: dict, text: str, include_quote=False) -> str:
     """Ответ на черновик: id черновика («id: …» в конце его текста) едет в разговор с Claude."""
-    replied = (message.get("reply_to_message") or {}).get("text") or ""
+    reply = message.get("reply_to_message") or {}
+    replied = reply.get("text") or reply.get("caption") or ""
     found = re.findall(r"(?m)^id: ([A-Za-z0-9_-]{1,80})\s*$", replied)
-    return f"{text}\n[ответ на черновик id: {found[-1]}]" if found else text
+    if found:
+        return f"{text}\n[ответ на черновик id: {found[-1]}]"
+    if include_quote and replied:
+        return f"{text}\n[контекст ответа: {json.dumps(replied[:4000], ensure_ascii=False)}]"
+    return text
 
 
 def _take_note(deps, chat_id, text) -> str | None:
@@ -178,6 +184,56 @@ def _voice(deps, chat_id, message):
         return
     deps.tg.edit(chat_id, mid, f"🎙 Услышал: {text}")
     _queue(deps, chat_id, message["message_id"], "voice", _with_reply_context(message, text))
+
+
+def _photo(deps, chat_id, message):
+    """A photograph is a real queued message, independent of the photo worker."""
+    from orchestrator_bot.telegram_api import IMAGE_MAX_BYTES, image_mime
+    try:
+        if message.get("photo"):
+            source = max(message["photo"], key=lambda p: (p.get("width", 0) * p.get("height", 0),
+                                                        p.get("file_size", 0)))
+        else:
+            source = message.get("document") or {}
+            if not (str(source.get("mime_type", "")).startswith("image/") or
+                    re.search(r"\.(?:jpe?g|png|webp)$", str(source.get("file_name", "")), re.I)):
+                raise ValueError("Пришлите фотографию или изображение файлом JPEG, PNG или WebP")
+        if int(source.get("file_size") or 0) > IMAGE_MAX_BYTES:
+            raise ValueError("Фотография слишком большая — максимум 10 МБ")
+        data = deps.tg.download_file(source["file_id"], max_bytes=IMAGE_MAX_BYTES)
+        if len(data) > IMAGE_MAX_BYTES:
+            raise ValueError("Фотография слишком большая — максимум 10 МБ")
+        attachment = {"mime_type": image_mime(data), "data": base64.b64encode(data).decode("ascii")}
+        for field in ("file_unique_id", "file_name"):
+            if source.get(field):
+                attachment[field] = str(source[field])[:200]
+    except ValueError as exc:
+        deps.tg.send(chat_id, f"📷 {exc}.")
+        return
+    except Exception as exc:
+        # HTTP exceptions can contain the bot-token URL; never put them in logs.
+        log.warning("Не удалось скачать фотографию: %s", exc.__class__.__name__)
+        deps.tg.send(chat_id, "📷 Не удалось загрузить фотографию. Пришлите её ещё раз.")
+        return
+    text = _with_reply_context(message, (message.get("caption") or "").strip() or "Фотография поставщика",
+                               include_quote=True)
+    try:
+        if message.get("media_group_id"):
+            saved = deps.store.add_photo_message(message["message_id"], text, attachment,
+                                                  message["media_group_id"], now=deps.clock())
+            created = bool(saved and saved[1])
+        else:
+            created = deps.store.add_message(message["message_id"], "photo", text, now=deps.clock(),
+                                             attachments=[attachment]) is not None
+    except ValueError as exc:
+        deps.tg.send(chat_id, f"📷 {exc}.")
+        return
+    if not created:
+        return
+    hb = deps.store.last_heartbeat()
+    notice = (OFFLINE_NOTICE if hb is None or deps.clock() - hb > deps.heartbeat_stale_after
+              else "📷 Фотография принята, разбираю модели, цены и остатки.")
+    deps.tg.send(chat_id, notice)
 
 
 def _callback(deps, cq):
@@ -278,6 +334,9 @@ def handle_update(update: dict, deps: Deps) -> None:
         return                                       # повторная доставка после перезапуска
     if message.get("voice"):
         _voice(deps, chat_id, message)
+        return
+    if message.get("photo") or message.get("document"):
+        _photo(deps, chat_id, message)
         return
     text = (message.get("text") or "").strip()
     if not text:

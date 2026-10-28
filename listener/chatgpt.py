@@ -16,6 +16,7 @@ from typing import Iterator
 import httpx
 
 from listener.provider_errors import ProviderError
+from listener.attachments import decode_images, metadata_payload
 
 BASE_URL = "https://api.openai.com/v1"
 MODEL_TTL = 600
@@ -227,7 +228,18 @@ class ChatGPTProvider:
                 raise _failure(default="configuration")
             inputs.append({"role": item["role"], "content": item["content"]})
         try:
-            inputs.append({"role": "user", "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))})
+            images = decode_images(payload)
+            serialized = json.dumps(metadata_payload(payload, images), ensure_ascii=False, separators=(",", ":"))
+            content = serialized
+            if images:
+                content = [{"type": "input_text", "text": serialized}]
+                for image in images:
+                    content.extend([
+                        {"type": "input_text", "text": f"Приложение attachment_index={image['index']}"},
+                        {"type": "input_image", "image_url": f"data:{image['mime_type']};base64,{image['data']}",
+                         "detail": "high"},
+                    ])
+            inputs.append({"role": "user", "content": content})
         except (TypeError, ValueError):
             raise _failure(default="configuration") from None
         return self._respond(instructions, inputs)["text"]

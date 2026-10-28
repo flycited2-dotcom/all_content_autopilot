@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from listener import brain
+from listener.attachments import decode_images, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES
 from listener.intent_validation import validated_intent
 from listener.pending import write_json
 from listener.provider_errors import ProviderError, ProvidersUnavailable
@@ -127,6 +128,34 @@ class ModelRouter:
 
     def run_turn(self, payload, session):
         with self._lock:
+            try:
+                decode_images(payload)
+            except ValueError as error:
+                # A bad source is a completed user-facing rejection, not a
+                # provider outage that would keep pending-turn retrying forever.
+                log.warning("Входящие фотографии отклонены: %s", type(error).__name__)
+                if payload["message"].get("attachment_context") == "recent_photos":
+                    # Optional earlier photographs must not obstruct a later
+                    # status question or an independent textual task.
+                    payload = json.loads(json.dumps(payload, ensure_ascii=False))
+                    payload["message"].pop("attachments", None)
+                    payload["message"].pop("attachment_context", None)
+                    payload.setdefault("context", {})["photo_error"] = (
+                        "Недавние фото не удалось прочитать; попроси прислать заново "
+                        "только если текущая задача относится к ним")
+                    return self._run_turn(payload, session)
+                intent = {"reply": ("Не удалось прочитать фотографии: файл повреждён или превышен размер. "
+                                    f"Пришлите заново JPEG, PNG или WEBP: до {MAX_IMAGES} фото, "
+                                    f"до {MAX_IMAGE_BYTES // (1024 * 1024)} МБ каждое и "
+                                    f"до {MAX_TOTAL_BYTES // (1024 * 1024)} МБ суммарно."), "actions": []}
+                if self.state.get("last_message_id") != payload["message"]["id"]:
+                    history = (payload.get("context", {}).get("history") or self.state["history"]) + [
+                        {"role": "user", "content": str(payload["message"].get("text", ""))[:4000]},
+                        {"role": "assistant", "content": json.dumps(intent, ensure_ascii=False)}]
+                    self.state["history"] = history[-12:]
+                    self.state["last_message_id"] = payload["message"]["id"]
+                    self._save()
+                return intent
             return self._run_turn(payload, session)
 
     def _run_turn(self, payload, session):

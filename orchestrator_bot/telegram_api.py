@@ -9,6 +9,18 @@ import httpx
 _MAX_TEXT = 4000            # лимит Telegram 4096, с запасом
 CONNECT_TIMEOUT = 2.0       # как content-factory publish/telegram.py: связь VPS↔Telegram периодически
 CONNECT_RETRIES = 7         # не устанавливается; повторяется только соединение — запрос не дублируется
+IMAGE_MAX_BYTES = 10 * 1024 * 1024
+
+
+def image_mime(data: bytes) -> str:
+    """Use the received image format rather than a filename or Telegram MIME hint."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    raise ValueError("Нужна фотография в формате JPEG, PNG или WebP")
 
 
 def telegram_client(timeout: float = 40.0) -> httpx.Client:
@@ -84,6 +96,24 @@ class TelegramApi:
         resp = self.http.get(f"https://api.telegram.org/file/bot{self.token}/{path}")
         resp.raise_for_status()
         return resp.content
+
+    def download_file(self, file_id, max_bytes=IMAGE_MAX_BYTES) -> bytes:
+        """Download an attachment with a bound even when size headers are absent."""
+        info = self._call("getFile", file_id=file_id)
+        if int(info.get("file_size") or 0) > max_bytes:
+            raise ValueError("Фотография слишком большая — максимум 10 МБ")
+        path = info["file_path"]
+        with self.http.stream("GET", f"https://api.telegram.org/file/bot{self.token}/{path}") as resp:
+            resp.raise_for_status()
+            length = resp.headers.get("Content-Length")
+            if length and int(length) > max_bytes:
+                raise ValueError("Фотография слишком большая — максимум 10 МБ")
+            data = bytearray()
+            for chunk in resp.iter_bytes(chunk_size=64 * 1024):
+                if len(data) + len(chunk) > max_bytes:
+                    raise ValueError("Фотография слишком большая — максимум 10 МБ")
+                data.extend(chunk)
+        return bytes(data)
 
     def answer_callback(self, callback_id, text=""):
         self._call("answerCallbackQuery", callback_query_id=callback_id, text=text)

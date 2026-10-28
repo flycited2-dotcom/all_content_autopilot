@@ -76,6 +76,11 @@ def validated_intent(value) -> dict:
                 if flag in action and type(action[flag]) is not bool:
                     raise ValueError("Неверный флаг отбора")
             _when(action)
+        elif kind == "enqueue_supplier_products":
+            from orchestrator_bot.supplier_import import normalize_action
+            normalize_action(action)
+            allowed.update(("category", "brand", "markup_percent", "items", "at", "day"))
+            _when(action)
         elif kind == "cancel":
             allowed.add("task_ref")
             if not isinstance(action.get("task_ref"), str) or not re.fullmatch(r"[1-9]\d{0,18}", action["task_ref"]):

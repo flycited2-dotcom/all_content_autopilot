@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,6 +13,7 @@ from orchestrator_bot.intents import Outcome, Result
 
 log = logging.getLogger("orchestrator_bot")
 EDITORIAL = ("run_editorial", "revise_editorial")
+CAPABILITIES = ["list_products", "product_selection", "full_catalog", "supplier_photo_import"]
 
 
 def text_chunks(text: str, maximum=3800):
@@ -36,8 +38,12 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
     intent = intents.parse_intent(raw_intent) if isinstance(raw_intent, str) else raw_intent
     reply, acts = intents.normalize(intent)          # разбор до отметки: битое намерение не «сжигает» сообщение
     if not store.mark_intent(msg_id):
-        store.mark_done(msg_id)                      # повтор после потерянного ответа — не зацикливать
-        return {**(store.get_response(msg_id) or {"ok": True, "editorial": []}), "duplicate": True}
+        response = store.get_response(msg_id)
+        # A supplier dispatch has its own durable receipt. After a process crash,
+        # recover that result and batch instead of silently consuming the photo.
+        if response is not None or not acts or any(a["type"] != "enqueue_supplier_products" for a in acts):
+            store.mark_done(msg_id)
+            return {**(response or {"ok": True, "editorial": []}), "duplicate": True}
     results, editorial = [], []
     for action in acts:
         try:
@@ -77,6 +83,7 @@ def _failed(what, exc) -> str:
 
 def make_server(store, factory, send, token, port, threshold=40, clock=time.time,
                 on_draft=None) -> ThreadingHTTPServer:
+    intent_lock = threading.RLock()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):          # без журнала запросов в stderr
             pass
@@ -106,11 +113,14 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
                 heartbeat = store.last_heartbeat()
                 return self._json(200, {'ok': True, 'queued': store.count_new(),
                     'heartbeat_age': max(0, clock() - heartbeat) if heartbeat else None,
-                    'capabilities': ['list_products', 'product_selection', 'full_catalog']})
+                    'capabilities': CAPABILITIES})
             if self.path != "/next":
                 return self._json(404, {"error": "not found"})
             now = clock()
             message = store.claim_next(now)
+            if message:
+                from orchestrator_bot.supplier_import import source_message
+                message = source_message(store, message["id"])
             hint, agent = {}, ""
             if message:                                 # каталог и агент нужны только для настоящего сообщения
                 try:
@@ -122,7 +132,7 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
                 except Exception:
                     agent = "состояние контент-агента неизвестно"
             self._json(200, {"message": message, "context": {"hint": hint, "workers": agent,
-                                                              "capabilities": ["list_products", "product_selection", "full_catalog"],
+                                                              "capabilities": CAPABILITIES,
                                                               "history": store.dialogue_before(message["id"]) if message else [],
                                                               "today": store.actions_since(start_of_day(now))}})
 
@@ -153,8 +163,9 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
                 if self.path == "/draft" and on_draft is not None:   # этап 3: принятая версия → картинка → ✅
                     return self._json(200, on_draft(body["draft"]))
                 if self.path == "/intent":
-                    return self._json(200, handle_intent(store, factory, send, body["message_id"],
-                                                         body["intent"], threshold))
+                    with intent_lock:
+                        result = handle_intent(store, factory, send, body["message_id"], body["intent"], threshold)
+                    return self._json(200, result)
             except (KeyError, ValueError) as exc:
                 return self._json(400, {"error": str(exc)})
             except Exception as exc:

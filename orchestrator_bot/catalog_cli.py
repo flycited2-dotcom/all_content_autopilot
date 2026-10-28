@@ -68,8 +68,9 @@ def enqueue(cf, args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'resume-photo', 'batch-status', 'publish-keys', 'cancel'))
+    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'batch-status', 'publish-keys', 'cancel'))
     parser.add_argument('--audit-json')
+    parser.add_argument('--supplier-file')
     for name in ('state-db', 'prices-dir', 'queue-db', 'category', 'source', 'quotas', 'btu',
                  'keys-json', 'due'):
         parser.add_argument('--' + name)
@@ -79,10 +80,15 @@ def main(argv=None):
     for flag in ('inverter', 'heat-pump', 'full-dc', 'no-wake'):
         parser.add_argument('--' + flag, action='store_true')
     args = parser.parse_args(argv)
-    if args.command not in ('hint', 'resume-photo', 'batch-status', 'publish-keys', 'cancel') and not args.category:
+    if args.command not in ('hint', 'enqueue-supplier', 'resume-photo', 'batch-status', 'publish-keys', 'cancel') and not args.category:
         parser.error('--category is required')
+    if args.command == 'enqueue-supplier' and not args.supplier_file:
+        parser.error('--supplier-file is required')
     from content_factory import agent_cli as cf
-    if args.command in ('batch-status', 'publish-keys', 'cancel'):
+    if args.command == 'enqueue-supplier':
+        from orchestrator_bot.supplier_catalog import run
+        result = run(cf, args)
+    elif args.command in ('batch-status', 'publish-keys', 'cancel'):
         from orchestrator_bot.key_commands import run
         result = run(cf, args)
     elif args.command == 'resume-photo':

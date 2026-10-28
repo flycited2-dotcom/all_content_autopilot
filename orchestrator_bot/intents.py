@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable
 
-ACTION_TYPES = ("enqueue_products", "list_products", "cancel", "run_editorial", "revise_editorial", "redo_visual", "ask")
+ACTION_TYPES = ("enqueue_products", "enqueue_supplier_products", "list_products", "cancel", "run_editorial", "revise_editorial", "redo_visual", "ask")
 _TIME = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 _DRAFT_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _ISO_DAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
@@ -96,6 +96,9 @@ def normalize(intent: dict) -> tuple[str, list[dict]]:
                 clean["type"] = kind
                 clean.pop("at")
                 clean.pop("day")
+        elif kind == "enqueue_supplier_products":
+            from orchestrator_bot.supplier_import import normalize_action
+            clean = normalize_action(action)
         elif kind == "cancel":
             clean = {"type": "cancel", "task_ref": str(action.get("task_ref") or "")} if action.get("task_ref") else None
         elif kind == "run_editorial":
