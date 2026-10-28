@@ -148,3 +148,30 @@ def test_owner_sees_notes_of_a_passed_on_regenerate_instead_of_silence(tmp_path,
     service.notify(store, tg, 123)
     text = '\n'.join(event[2] for event in tg.events if event[0] == 'text')
     assert 'Аудитор нашёл расхождение' in text and 'Фото не задержано' in text
+
+
+def test_old_server_rejecting_review_does_not_block_other_decisions(tmp_path, monkeypatch):
+    from photo_auditor import progress, runtime, service
+    from photo_auditor.store import AuditStore
+    monkeypatch.setattr(runtime, 'load', lambda root: {'api_token': 'test'})
+    monkeypatch.setattr(service, '_review_resume_paused_until', 0.0)
+    (tmp_path / 'rules').mkdir()
+    (tmp_path / 'rules/photo-auditor-mode.yaml').write_text('mode: advisory\n', encoding='utf-8')
+    store = AuditStore(tmp_path / 'runs/photo-auditor')
+    for job_id, verdict in ((5, 'review'), (6, 'regenerate')):
+        runtime.register_job(tmp_path, job_id, 'research', 'Midea', 'ABC-12-RU', 'кондиционеры')
+        row = store.submit({'product_id': f'fotogen-{job_id}', 'revision': 0, 'brand': 'Midea', 'model': 'ABC-12-RU'},
+                           picture())
+        store.finish(store.claim(audit_id=row['id']), {'verdict': verdict, 'reason': 'Отличие', 'checks': [],
+                                                       'sources': [], 'dimensions_note': 'Не измерены'})
+    monkeypatch.setattr(progress, 'restore_research', lambda *args: True)
+    delivered = []
+    def deliver(payload):
+        delivered.append(payload['status'])
+        if payload['status'] == 'review':
+            raise ValueError('Решение не разрешает продолжение')
+        return {'handled': True}
+    service.recover_pipeline(store, deliver)
+    assert delivered == ['regenerate', 'review']
+    service.recover_pipeline(store, deliver)
+    assert delivered == ['regenerate', 'review']  # paused, no request storm every 3 seconds

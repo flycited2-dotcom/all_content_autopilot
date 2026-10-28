@@ -289,6 +289,10 @@ def notify(store, tg, owner):
         store.notified(row["id"])
 
 
+REVIEW_RESUME_PAUSE = 600
+_review_resume_paused_until = 0.0
+
+
 def recover_pipeline(store, deliver=None):
     """Only the latest decision can resume a failed card; the server deduplicates it."""
     if deliver is None:
@@ -300,8 +304,13 @@ def recover_pipeline(store, deliver=None):
         with httpx.Client(timeout=20, trust_env=False) as http:
             api = ApiClient(os.environ.get('ORCH_API_URL', 'http://127.0.0.1:8790'), token, http=http)
             return recover_pipeline(store, lambda payload: api._post('/photo-audit-result', payload))
+    global _review_resume_paused_until
     from photo_auditor.mode import advisory
-    for row in store.recovery_results(include_review=advisory(store.root.parent.parent)):
+    include_review = advisory(store.root.parent.parent) and time.time() >= _review_resume_paused_until
+    # Approved/regenerate decisions go first: a server that does not yet accept
+    # advisory `review` resumptions must not delay the decisions it does accept.
+    rows = sorted(store.recovery_results(include_review=include_review), key=lambda r: r['status'] == 'review')
+    for row in rows:
         match = re.fullmatch(r'fotogen-([1-9][0-9]*)', row['product_id'])
         if not match:
             continue
@@ -329,7 +338,12 @@ def recover_pipeline(store, deliver=None):
             if result.get('handled'):
                 store.recovery_delivered(row['id'], row['attempt'], result)
         except Exception as exc:
-            log.warning('Доставка решения в конвейер отложена: %s', type(exc).__name__)
+            if row['status'] == 'review':
+                _review_resume_paused_until = time.time() + REVIEW_RESUME_PAUSE
+                log.warning('Возврат удержанных фото отложен на %d мин: %s (сервер оркестратора ещё не обновлён?)',
+                            REVIEW_RESUME_PAUSE // 60, type(exc).__name__)
+            else:
+                log.warning('Доставка решения в конвейер отложена: %s', type(exc).__name__)
             break
 
 
