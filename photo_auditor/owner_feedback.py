@@ -18,6 +18,8 @@ log = logging.getLogger('photo_auditor')
 PREFIX = 'owner-correction:'
 MAX_NOTES = 4000
 MAX_VOICE_BYTES = 10 * 1024 * 1024
+TTL = 1800
+PAGE_SIZE = 12
 _transcriber = None
 
 
@@ -44,7 +46,12 @@ def _transcribe(data, hint):
 def _load(store, key):
     with store.connect() as db:
         row = db.execute('SELECT value FROM meta WHERE key=?', (PREFIX + key,)).fetchone()
-    return json.loads(row[0]) if row else None
+    try:
+        value = json.loads(row[0]) if row else None
+        return value if isinstance(value, dict) else None
+    except (ValueError, TypeError):
+        log.warning('Повреждённое состояние замечания пропущено')
+        return None
 
 
 def _save(store, key, value):
@@ -55,6 +62,10 @@ def _save(store, key, value):
 
 def pending(store, owner):
     return _load(store, 'pending:' + str(owner))
+
+
+def _expired(value):
+    return time.time() - value.get('created', 0) > TTL
 
 
 def _current(store, audit_id):
@@ -82,6 +93,10 @@ def begin(store, audit_id, owner, callback_id):
     row, job_id = _current(store, audit_id)
     if type(owner) is not int or owner <= 0 or not isinstance(callback_id, str) or not callback_id:
         raise ValueError('Действие владельца не подтверждено')
+    current = pending(store, owner)
+    if (current and not _expired(current) and current.get('audit_id') == audit_id and
+            current.get('callback_id') == callback_id):
+        return current
     value = {'request_id': uuid.uuid4().hex, 'audit_id': audit_id, 'job_id': job_id,
              'sha256': row['sha256'], 'revision': row['revision'], 'brand': row['product']['brand'],
              'model': row['product']['model'], 'actor_id': owner, 'notes': '', 'created': time.time(),
@@ -103,6 +118,9 @@ def capture(store, owner, text, message_id):
     value = pending(store, owner)
     if not value:
         raise ValueError('Сначала нажмите «Указать ошибку» под нужной карточкой.')
+    if _expired(value):
+        cancel(store, owner)
+        raise ValueError('Время ввода замечания истекло. Выберите карточку заново.')
     row, _ = _current(store, value['audit_id'])
     if row['sha256'] != value['sha256']:
         raise ValueError('Карточка изменилась; выберите её заново.')
@@ -125,6 +143,9 @@ def confirm(store, owner, request_id):
     value = pending(store, owner)
     if not value or value['request_id'] != request_id or not value['notes']:
         raise ValueError('Это устаревшая кнопка. Укажите ошибку под нужной карточкой заново.')
+    if _expired(value):
+        cancel(store, owner)
+        raise ValueError('Время подтверждения истекло. Выберите карточку заново.')
     row, job_id = _current(store, value['audit_id'])
     if row['sha256'] != value['sha256']:
         raise ValueError('Карточка изменилась; исправление не запущено.')
@@ -148,32 +169,48 @@ def _keyboard(value):
             [{'text': 'Отмена', 'callback_data': 'qf:cancel:' + value['request_id']}]]
 
 
-def show_cards(store, tg, owner):
+def show_cards(store, tg, owner, page=0):
+    if type(page) is not int or not 0 <= page <= 10000:
+        return
     with store.connect() as db:
         rows = db.execute("SELECT id FROM audits WHERE status IN ('approved','review','regenerate') "
-                          'ORDER BY created DESC LIMIT 100').fetchall()
+                          'ORDER BY created DESC').fetchall()
     buttons = []
+    skipped = 0
     for saved in rows:
         try:
             row, job_id = _current(store, saved['id'])
         except (ValueError, OSError, AuditHold):
             continue
+        if skipped < page * PAGE_SIZE:
+            skipped += 1
+            continue
         buttons.append([{'text': f"{row['product']['brand']} {row['product']['model']} · №{job_id}"[:100],
                          'callback_data': 'qf:begin:' + row['id']}])
-        if len(buttons) >= 12:
+        if len(buttons) > PAGE_SIZE:
             break
+    more = len(buttons) > PAGE_SIZE
+    buttons = buttons[:PAGE_SIZE]
+    navigation = []
+    if page:
+        navigation.append({'text': '← Назад', 'callback_data': f'qf:page:{page - 1}'})
+    if more:
+        navigation.append({'text': 'Дальше →', 'callback_data': f'qf:page:{page + 1}'})
+    if navigation:
+        buttons.append(navigation)
     tg.send(owner, 'Выберите карточку, затем напишите или надиктуйте, что исправить.' if buttons else
             'Пока нет готовых карточек, связанных с генератором.', buttons or None)
 
 
 def handle_callback(callback, store, tg, owner):
     parts = callback.get('data', '').split(':')
-    if parts == ['qf', 'list', 'all']:
+    if parts == ['qf', 'list', 'all'] or (len(parts) == 3 and parts[:2] == ['qf', 'page'] and
+                                         parts[2].isdigit() and len(parts[2]) <= 5):
         try:
             tg.answer_callback(callback['id'])
         except Exception:
             pass
-        show_cards(store, tg, owner)
+        show_cards(store, tg, owner, 0 if parts[1] == 'list' else int(parts[2]))
         return True
     if len(parts) != 3 or parts[0] != 'qf' or not re.fullmatch('[a-f0-9]{32}', parts[2]):
         return False
@@ -195,9 +232,10 @@ def handle_callback(callback, store, tg, owner):
         elif parts[1] == 'cancel':
             tg.send(owner, 'Ввод замечания отменён.' if cancel(store, owner, parts[2]) else 'Это окно ввода уже закрыто.')
         elif parts[1] == 'send':
-            _, new = confirm(store, owner, parts[2])
+            receipt, new = confirm(store, owner, parts[2])
             tg.send(owner, 'Замечание подтверждено и сохранено для отправки на исправление. Публикация не запрашивается.'
-                    if new else 'Это замечание уже подтверждено; повторная генерация не заказывается.')
+                    if new else (_result_text(receipt) if receipt.get('status') == 'delivered' else
+                                 'Это замечание уже подтверждено и ожидает отправки; повторная генерация не заказывается.'))
         else:
             return False
     except (ValueError, OSError, AuditHold) as exc:
@@ -209,6 +247,10 @@ def handle_message(message, store, tg, owner, transcriber=None):
     value = pending(store, owner)
     if not value:
         return False
+    if _expired(value):
+        cancel(store, owner)
+        tg.send(owner, 'Время ввода замечания истекло. Выберите карточку заново; это сообщение не передано генератору.')
+        return True
     text = (message.get('text') or '').strip()
     if text in ('/cancel', 'Отмена'):
         cancel(store, owner)
@@ -258,6 +300,38 @@ def handle_message(message, store, tg, owner, transcriber=None):
     return True
 
 
+def _result_text(item):
+    payload, result = item['payload'], item.get('result') or {}
+    job = result.get('job_id') or result.get('new_job_id')
+    if job and result.get('linked') is False:
+        return (f'Задание исправления №{job} принято генератором, но его не удалось связать с товаром. '
+                + str(result.get('message') or result.get('reason') or 'Нужен разбор состояния карточки.')[:1200])
+    if job and not result.get('reason') and result.get('submitted') is not False:
+        return (f"🔄 Замечание передано генератору: {payload['brand']} {payload['model']}. "
+                f'Задание №{job}. В него включены ваши замечания и контекст предыдущей карточки.')
+    return 'Исправление карточки не запущено: ' + str(
+        result.get('message') or result.get('reason') or 'проверьте актуальное превью')[:1200]
+
+
+def _notify_result(store, key, item, tg, now):
+    # Records delivered by older releases have no notification marker; avoid
+    # replaying their entire history when this version first starts.
+    if tg is None or item.get('notified', True) or item.get('notify_retry_at', 0) > now:
+        return
+    try:
+        for part in text_chunks(_result_text(item)):
+            tg.send(item['payload']['actor_id'], part)
+    except Exception as exc:
+        # The render request is already delivered. Retrying the notification
+        # must never re-submit the paid operation.
+        log.warning('Ответ по замечанию владельца отложен: %s', type(exc).__name__)
+        item['notify_retry_at'] = now + 30
+    else:
+        item['notified'] = True
+        item.pop('notify_retry_at', None)
+    _save(store, key.removeprefix(PREFIX), item)
+
+
 def recover_owner_feedback(store, deliver=None, *, tg=None, owner=None, now=None):
     now = time.time() if now is None else now
     if deliver is None:
@@ -272,23 +346,35 @@ def recover_owner_feedback(store, deliver=None, *, tg=None, owner=None, now=None
     with store.connect() as db:
         rows = db.execute('SELECT key,value FROM meta WHERE key LIKE ?', (PREFIX + 'outbox:%',)).fetchall()
     for saved in rows:
-        item = json.loads(saved['value'])
-        if item.get('status') != 'pending' or item.get('retry_at', 0) > now:
+        try:
+            item = json.loads(saved['value'])
+        except (ValueError, TypeError):
+            log.warning('Повреждённое подтверждение замечания пропущено')
+            continue
+        if not isinstance(item, dict) or not isinstance(item.get('payload'), dict):
             continue
         payload = item['payload']
+        if type(payload.get('actor_id')) is not int:
+            continue
         if owner is not None and payload['actor_id'] != owner:
             continue
-        if not hmac.compare_digest(item.get('signature', ''), runtime._signature(store.root.parent.parent, payload)):
+        if not isinstance(item.get('signature'), str) or not hmac.compare_digest(
+                item['signature'], runtime._signature(store.root.parent.parent, payload)):
             log.warning('Неподтверждённое замечание владельца не отправлено')
+            continue
+        if item.get('status') in ('delivered', 'superseded'):
+            _notify_result(store, saved['key'], item, tg, now)
+            continue
+        if item.get('status') != 'pending' or item.get('retry_at', 0) > now:
             continue
         row = store.get(payload['audit_id'])
         latest = store.latest(row['product_id']) if row else None
         if (not row or not latest or latest['id'] != row['id'] or row['sha256'] != payload['sha256']):
-            item.update(status='superseded', result={'handled': True, 'reason': 'superseded'})
+            item.update(status='superseded', notified=False, result={'handled': True, 'reason': 'superseded',
+                        'message': 'Исправление старой карточки отменено: появилась новая ревизия. '
+                                   'Откройте последнее фото и укажите замечание к нему.'})
             _save(store, saved['key'].removeprefix(PREFIX), item)
-            if tg is not None:
-                tg.send(payload['actor_id'], 'Исправление старой карточки отменено: появилась новая ревизия. '
-                        'Откройте последнее фото и укажите замечание к нему.')
+            _notify_result(store, saved['key'], item, tg, now)
             continue
         if row['status'] not in ('approved', 'review', 'regenerate'):
             item['retry_at'] = now + 30
@@ -307,13 +393,6 @@ def recover_owner_feedback(store, deliver=None, *, tg=None, owner=None, now=None
             item['retry_at'] = now + 30
             _save(store, saved['key'].removeprefix(PREFIX), item)
             continue
-        item.update(status='delivered', result=result)
+        item.update(status='delivered', result=result, notified=False)
         _save(store, saved['key'].removeprefix(PREFIX), item)
-        if tg is not None:
-            job = result.get('job_id') or result.get('new_job_id')
-            if job and not result.get('reason'):
-                tg.send(payload['actor_id'], f"🔄 Замечание передано генератору: {payload['brand']} {payload['model']}. "
-                        f"Задание №{job}. В него включены ваши замечания и контекст предыдущей карточки.")
-            else:
-                tg.send(payload['actor_id'], 'Исправление карточки не запущено: ' +
-                        str(result.get('message') or result.get('reason') or 'проверьте актуальное превью')[:300])
+        _notify_result(store, saved['key'], item, tg, now)

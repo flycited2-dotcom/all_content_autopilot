@@ -275,6 +275,10 @@ def notify(store, tg, owner):
             publishable=content_brief(store.root.parent.parent,row['product']) is not None
         except (AuditHold,OSError,ValueError):
             publishable=False
+        with store.connect() as db:
+            route = db.execute('SELECT value FROM meta WHERE key=?', ('photo-review-route:' + row['id'],)).fetchone()
+        if route and json.loads(route[0]).get('supports_publication') is False:
+            publishable = False
         if publishable:
             keyboard.insert(0,[{'text':'✅ Подтвердить и опубликовать в канал','callback_data':f"qa:publish:{row['id']}"}])
         if image_problem is None:
@@ -367,6 +371,11 @@ def handle_update(update, store, tg, owner, *, transcriber=None):
                 pass
             try:
                 if data[1] in ('approve','match','publish'):
+                    if data[1] == 'publish':
+                        with store.connect() as db:
+                            route = db.execute('SELECT value FROM meta WHERE key=?', ('photo-review-route:' + data[2],)).fetchone()
+                        if route and json.loads(route[0]).get('supports_publication') is False:
+                            raise ValueError('Это самостоятельное фотозадание: результат доставляет фотоагент; кнопка публикации контент-завода к нему не относится.')
                     result = store.owner_approve(data[2], owner, callback['id'],publish=data[1]=='publish')
                     product=result['product']
                     message=(f"✅ Подтверждено: {product['brand']} {product['model']}.\n"

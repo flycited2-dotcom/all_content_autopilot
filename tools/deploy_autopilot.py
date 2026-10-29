@@ -36,7 +36,7 @@ try:
  os.replace(stage/'orchestrator_bot',live)
  subprocess.run(['systemctl','start','orchestrator-bot.service'],check=True)
  ready=False
- for _ in range(20):
+ for _ in range(90):
   try:
    urllib.request.urlopen('http://127.0.0.1:8790/next',timeout=1)
   except urllib.error.HTTPError as error:
@@ -71,7 +71,7 @@ def main():
     payload = base64.b64encode(json.dumps(manifest).encode()).decode()
     script = 'import base64,json\nmanifest=json.loads(base64.b64decode(' + repr(payload) + '))\n' + REMOTE
     process = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', 'sprintbox-itp', 'python3 -'],
-                             input=script.encode(), capture_output=True, timeout=120)
+                             input=script.encode(), capture_output=True, timeout=240)
     if process.returncode:
         raise RuntimeError('Deployment failed; original service restoration was attempted. ' +
                            process.stderr.decode('utf-8', errors='replace')[-1000:])

@@ -40,11 +40,15 @@ def _same_card(before, after):
 
 def dismiss_pending(store):
     request_id = store.get_meta(PENDING)
-    if request_id and (ticket := _ticket(store, request_id)) and ticket.get('phase') in ('notes', 'confirm'):
+    ticket = _ticket(store, request_id) if request_id else None
+    if ticket and ticket.get('phase') == 'sending':
+        return False
+    if ticket and ticket.get('phase') in ('notes', 'confirm'):
         ticket['phase'] = 'cancelled'
         _save(store, ticket)
     if request_id:
         _clear_pending(store, request_id)
+    return True
 
 
 def voice_hint(deps):
@@ -55,19 +59,28 @@ def voice_hint(deps):
     return f" Замечание к карточке {card['brand']} {card['model']}: что неверно и как исправить."
 
 
-def list_cards(deps, chat_id, batch='all'):
+def list_cards(deps, chat_id, batch='all', page=0):
+    if type(page) is not int or not 0 <= page <= 10000:
+        return
     keys = None
     if batch != 'all':
         if not batch.isdigit() or not (row := deps.store.get_batch(int(batch))):
             deps.tg.send(chat_id, 'Партия не найдена. Откройте «Ошибка в карточке» в меню.')
             return
         keys = row['keys']
-    cards = photo_reviews.list_cards(deps.store, keys=keys, limit=12)
+    cards = photo_reviews.list_cards(deps.store, keys=keys, limit=13, offset=page * 12)
     if not cards:
         deps.tg.send(chat_id, 'Пока нет карточек с данными проверки. Они появятся после связи с фотоагентом.')
         return
     keyboard = [[{'text': f"{c['brand']} {c['model']} · №{c['job_id']}"[:100],
-                  'callback_data': 'pf:edit:' + c['audit_id']}] for c in cards]
+                  'callback_data': 'pf:edit:' + c['audit_id']}] for c in cards[:12]]
+    navigation = []
+    if page:
+        navigation.append({'text': '← Назад', 'callback_data': f'pf:page:{batch}.{page - 1}'})
+    if len(cards) > 12:
+        navigation.append({'text': 'Дальше →', 'callback_data': f'pf:page:{batch}.{page + 1}'})
+    if navigation:
+        keyboard.append(navigation)
     deps.tg.send(chat_id, 'Выберите карточку, в которой нужно указать ошибку. '
                  'После выбора можно написать замечание или отправить голосовое.', keyboard)
 
@@ -200,6 +213,10 @@ def send(deps, chat_id, request_id):
     if ticket.get('phase') == 'sent':
         deps.tg.send(chat_id, f"Это замечание уже передано: задание №{ticket['result']['job_id']}.")
         return
+    if ticket.get('phase') == 'partial':
+        deps.tg.send(chat_id, str(ticket['result'].get('message') or
+                     f"Задание №{ticket['result']['job_id']} принято, но связь с товаром требует разбора.")[:3500])
+        return
     if (ticket.get('phase') not in ('confirm', 'sending') or
             ticket.get('phase') != 'sending' and deps.clock() - ticket.get('created', 0) > TTL):
         deps.tg.send(chat_id, 'Это подтверждение больше не действует. Выберите карточку заново.')
@@ -225,15 +242,25 @@ def send(deps, chat_id, request_id):
         deps.tg.send(chat_id, f'Не удалось подтвердить передачу ({exc.__class__.__name__}). '
                      'Повторите этой же кнопкой: повтор запроса не должен создавать ещё одну переделку.')
         return
-    if isinstance(result, dict) and type(result.get('job_id')) is not int and result.get('handled') is True:
+    if isinstance(result, dict) and (type(result.get('job_id')) is not int or result.get('submitted') is False) and result.get('handled') is True:
         ticket.update(phase='rejected', result=result)
         _save(deps.store, ticket)
         _clear_pending(deps.store, request_id)
         deps.tg.send(chat_id, str(result.get('message') or 'Исправление не запущено: выберите актуальную карточку.')[:3500])
         return
     if not isinstance(result, dict) or type(result.get('job_id')) is not int:
-        deps.tg.send(chat_id, 'Сервер не подтвердил задание исправления. Запрос сохранён; '
+        explanation = str(result.get('message') or '')[:1500] if isinstance(result, dict) else ''
+        deps.tg.send(chat_id, (explanation + '\n' if explanation else '') +
+                     'Сервер пока не подтвердил задание исправления. Запрос сохранён; '
                      'повторите той же кнопкой после проверки статуса.')
+        return
+    if result.get('linked') is False:
+        ticket.update(phase='partial', result=result)
+        _save(deps.store, ticket)
+        _clear_pending(deps.store, request_id)
+        deps.tg.send(chat_id, f"Задание исправления №{result['job_id']} принято генератором, "
+                     'но его не удалось связать с товаром. ' +
+                     str(result.get('message') or result.get('reason') or 'Нужен разбор состояния карточки.')[:1500])
         return
     ticket.update(phase='sent', result=result)
     _save(deps.store, ticket)
@@ -249,6 +276,10 @@ def callback(deps, chat_id, data):
     _, op, key = parts
     if op == 'list':
         list_cards(deps, chat_id, key)
+    elif op == 'page':
+        match = re.fullmatch(r'(all|[0-9]+)\.([0-9]{1,5})', key)
+        if match:
+            list_cards(deps, chat_id, match[1], int(match[2]))
     elif op == 'edit':
         begin(deps, chat_id, key)
     elif op == 'send':

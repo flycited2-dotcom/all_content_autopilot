@@ -52,7 +52,7 @@ def deps(tmp_path, monkeypatch):
     card = {'audit_id': 'a' * 32, 'job_id': 3857, 'revision': 1, 'sha256': 'f' * 64,
             'brand': 'CARVER', 'model': 'PPG-11000 DVR', 'status': 'review', 'summary': 'Проверьте тип топлива'}
     monkeypatch.setattr(ui.photo_reviews, 'get_card', lambda store, audit_id: card if audit_id == card['audit_id'] else None)
-    monkeypatch.setattr(ui.photo_reviews, 'list_cards', lambda store, keys=None, limit=12: [card])
+    monkeypatch.setattr(ui.photo_reviews, 'list_cards', lambda store, keys=None, limit=12, offset=0: [card])
     monkeypatch.setattr(ui.photo_reviews, 'create_feedback', lambda c, n, a, r:
                         {**{k: c[k] for k in ('audit_id', 'job_id', 'revision', 'sha256', 'brand', 'model')},
                          'notes': n, 'actor_id': a, 'request_id': r})
@@ -236,3 +236,55 @@ def test_new_correction_is_not_dropped_after_long_previous_prompt(deps):
     drafts.redo_visual(deps.store, deps.factory, row['n'], 'Это дизельный генератор, убери бензин')
     assert deps.factory.visual_calls[0][0].startswith(
         drafts.WISH_MARKER + ': Это дизельный генератор, убери бензин')
+
+
+def test_older_cards_are_available_on_next_page(deps, monkeypatch):
+    cards = [{**deps.test_card, 'audit_id': f'{n:032x}', 'job_id': n} for n in range(30, 4, -1)]
+    calls = []
+    def listing(store, keys=None, limit=12, offset=0):
+        calls.append((limit, offset))
+        return cards[offset:offset + limit]
+    monkeypatch.setattr(ui.photo_reviews, 'list_cards', listing)
+    ui.list_cards(deps, OWNER)
+    first = deps.tg.sent[-1][1]
+    assert len(first) == 13
+    assert first[-1][0]['callback_data'] == 'pf:page:all.1'
+    bot.handle_update(cb('pf:page:all.1'), deps)
+    second = deps.tg.sent[-1][1]
+    assert second[0][0]['callback_data'] == 'pf:edit:' + cards[12]['audit_id']
+    assert second[-1][0]['callback_data'] == 'pf:page:all.0'
+    assert calls == [(13, 0), (13, 12)]
+
+
+def test_submission_without_product_link_never_promises_new_preview(deps):
+    request_id = start(deps)
+    bot.handle_update(message('Исправить топливо'), deps)
+    calls = []
+    def submit(payload):
+        calls.append(payload)
+        return {'handled': True, 'submitted': True, 'linked': False, 'job_id': 4000,
+                'message': 'Товар отменён во время передачи; нужна ручная проверка'}
+    deps.factory.correct_photo = submit
+    bot.handle_update(cb('pf:send:' + request_id), deps)
+    assert 'не удалось связать' in deps.tg.sent[-1][0]
+    assert 'Пришлю новую версию' not in deps.tg.sent[-1][0]
+    bot.handle_update(cb('pf:send:' + request_id), deps)
+    assert len(calls) == 1
+
+
+def test_rejected_old_job_id_is_not_reported_as_new_render(deps):
+    request_id = start(deps)
+    bot.handle_update(message('Исправить топливо'), deps)
+    deps.factory.correct_photo = lambda _: {'handled': True, 'submitted': False,
+        'job_id': deps.test_card['job_id'], 'message': 'Нет сохранённого исходника'}
+    bot.handle_update(cb('pf:send:' + request_id), deps)
+    assert deps.tg.sent[-1][0] == 'Нет сохранённого исходника'
+
+
+def test_switching_dialogue_cannot_forget_uncertain_submission(deps):
+    request_id = start(deps)
+    bot.handle_update(message('Исправить топливо'), deps)
+    deps.factory.fail_once = True
+    bot.handle_update(cb('pf:send:' + request_id), deps)
+    assert ui.dismiss_pending(deps.store) is False
+    assert deps.store.get_meta(ui.PENDING) == request_id

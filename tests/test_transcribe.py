@@ -102,3 +102,64 @@ def test_collapse_repeats_removes_whisper_loop():
     from orchestrator_bot.transcribe import collapse_repeats
     assert collapse_repeats("Поставщика Брис, LG, RULE, RULE, RULE, RULE, RULE,") == "Поставщика Брис, LG, RULE, RULE,"
     assert collapse_repeats("да да нормально") == "да да нормально"
+
+
+class SequencedModel:
+    def __init__(self, *outputs):
+        self.outputs = outputs
+        self.calls = []
+        self.audio = []
+
+    def transcribe(self, audio, **kwargs):
+        self.audio.append(audio)
+        self.calls.append(kwargs)
+        return [SimpleNamespace(text=self.outputs[len(self.calls) - 1])], None
+
+
+def test_product_hint_echo_retries_same_audio_without_prompt_or_vad(monkeypatch):
+    decoded = [0.1, -0.2, 0.05]
+    monkeypatch.setattr('orchestrator_bot.transcribe.decode_ogg', lambda data: decoded)
+    model = SequencedModel('Белый, 255л, 255л, 7ящиков',
+                           'На фото морозильный ларь, а должна быть вертикальная морозильная камера')
+    t = Transcriber(model_factory=lambda _: model)
+    text = t(b'OGG', 'Beko. Вертикальная морозильная камера, белый, 255 л, 7 ящиков')
+    assert text == 'На фото морозильный ларь, а должна быть вертикальная морозильная камера'
+    assert len(model.calls) == 2 and model.audio == [decoded, decoded]
+    assert model.calls[0]['vad_filter'] is True
+    assert model.calls[1]['vad_filter'] is False
+    assert model.calls[1]['initial_prompt'] is None
+    assert model.calls[1]['condition_on_previous_text'] is False
+
+
+def test_prompt_echo_is_not_presented_as_owner_speech_when_retry_is_still_bad(monkeypatch):
+    monkeypatch.setattr('orchestrator_bot.transcribe.decode_ogg', lambda _: [0.2])
+    model = SequencedModel('Белый 255л 7ящиков', 'Белый 255л 7ящиков')
+    t = Transcriber(model_factory=lambda _: model)
+    assert t(b'OGG', 'Beko белый, 255 л, 7 ящиков') == ''
+    assert len(model.calls) == 2
+
+
+@pytest.mark.parametrize('first', ['', 'RULE RULE RULE RULE RULE RULE', 'RULE,RULE,RULE',
+                                  'Убери бензин Убери бензин Убери бензин'])
+def test_blank_or_looped_pass_with_voiced_audio_gets_one_unbiased_retry(monkeypatch, first):
+    monkeypatch.setattr('orchestrator_bot.transcribe.decode_ogg', lambda _: [0.2])
+    model = SequencedModel(first, 'Убери неверный тип товара')
+    t = Transcriber(model_factory=lambda _: model)
+    assert t(b'OGG', 'Бренды: Beko') == 'Убери неверный тип товара'
+    assert len(model.calls) == 2 and model.calls[1]['vad_filter'] is False
+
+
+def test_silence_does_not_trigger_unprompted_hallucination(monkeypatch):
+    monkeypatch.setattr('orchestrator_bot.transcribe.decode_ogg', lambda _: [0.0] * 100)
+    model = SequencedModel('')
+    assert Transcriber(model_factory=lambda _: model)(b'OGG', 'Бренды: Beko') == ''
+    assert len(model.calls) == 1
+
+
+def test_normal_brand_and_correction_speech_stays_on_one_pass(monkeypatch):
+    monkeypatch.setattr('orchestrator_bot.transcribe.decode_ogg', lambda _: [0.2])
+    model = SequencedModel('Ресанта', 'Убери бензин, генератор дизельный')
+    t = Transcriber(model_factory=lambda _: model)
+    assert t(b'brand', 'Бренды: Ресанта, Carver') == 'Ресанта'
+    assert t(b'correction', 'CARVER PPG-5000D. Генератор бензиновый') == 'Убери бензин, генератор дизельный'
+    assert all(call['vad_filter'] is True for call in model.calls)

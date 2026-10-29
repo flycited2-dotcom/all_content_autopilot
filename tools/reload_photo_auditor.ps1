@@ -10,7 +10,8 @@ try {
  if ($auditors.Count -ne 1) { throw 'Expected one audit service' }
  try {
   Stop-ScheduledTask -TaskName 'AgentsMY Photo Auditor'
-  for ($reloadTick=0; $reloadTick -lt 25; $reloadTick++) {
+  # Telegram's active long poll and bounded connection retries can outlive 25s.
+  for ($reloadTick=0; $reloadTick -lt 90; $reloadTick++) {
    $oldAudit=Get-CimInstance Win32_Process -Filter "ProcessId=$($auditors[0].ProcessId)" -ErrorAction SilentlyContinue
    if (-not $oldAudit) { break }
    Start-Sleep -Seconds 1

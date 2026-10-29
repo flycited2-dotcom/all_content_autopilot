@@ -332,7 +332,11 @@ def _callback(deps, cq):
                 return
             kind = 'correction' if op == 'f' else ("visual" if op == "v" else "text")
             from orchestrator_bot import photo_feedback_ui
-            photo_feedback_ui.dismiss_pending(deps.store)
+            if not photo_feedback_ui.dismiss_pending(deps.store):
+                pending_id = deps.store.get_meta(photo_feedback_ui.PENDING)
+                deps.tg.send(chat_id, 'Сначала проверьте передачу предыдущего исправления, чтобы не заказать его дважды.',
+                             [[{'text': 'Проверить передачу', 'callback_data': 'pf:send:' + pending_id}]])
+                return
             deps.store.set_meta(AWAIT_NOTE, json.dumps({"kind": kind, "n": row["n"], "ts": deps.clock(),
                                                        'image_job': row.get('image_job')}))
             if op == 'f':

@@ -1,5 +1,6 @@
 """Owner decisions must include the actual saved image being judged."""
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,19 @@ class Telegram:
 
     def send(self, owner, text, keyboard=None):
         self.events.append(('text', owner, text, keyboard))
+
+
+def test_standalone_card_does_not_offer_factory_publication(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, 'load', lambda _: {'api_token': 'test'})
+    runtime.register_job(tmp_path, 71, 'kbt', 'Xiaomi', 'L43MB-APRU', 'Телевизор')
+    store, row = finished(tmp_path, product_id='fotogen-71')
+    with store.connect() as db:
+        db.execute('INSERT INTO meta VALUES(?,?)', ('photo-review-route:' + row['id'], json.dumps({'supports_publication': False})))
+    tg = Telegram()
+    service.notify(store, tg, 123)
+    buttons = [b for event in tg.events if event[0] == 'text' and event[3] for line in event[3] for b in line]
+    assert not any(b['callback_data'].startswith('qa:publish:') for b in buttons)
+    assert any(b['callback_data'].startswith('qf:begin:') for b in buttons)
 
 
 @pytest.mark.parametrize('status', ['approved', 'regenerate', 'review'])

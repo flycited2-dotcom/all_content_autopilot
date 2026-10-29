@@ -280,3 +280,73 @@ def test_owner_can_reply_to_transcript_to_correct_recognition(saved):
     correction['message']['reply_to_message'] = {'message_id': draft['feedback_message_ids'][-1]}
     service.handle_update(correction, store, tg, OWNER)
     assert notes.pending(store, OWNER)['notes'] == 'Дизельный'
+
+
+def test_lost_telegram_result_is_retried_without_resubmitting_render(saved):
+    root, store, row, tg = saved
+    notes.begin(store, row['id'], OWNER, 'owner-click')
+    draft = notes.capture(store, OWNER, 'Исправить топливо', 10)
+    notes.confirm(store, OWNER, draft['request_id'])
+    delivered = []
+    def deliver(payload):
+        delivered.append(payload)
+        return {'handled': True, 'submitted': True, 'linked': True, 'job_id': 124}
+    class FailingTelegram(Telegram):
+        def send(self, *args):
+            raise RuntimeError('secret Telegram URL must not be shown')
+    notes.recover_owner_feedback(store, deliver, tg=FailingTelegram(), owner=OWNER, now=100)
+    reopened = AuditStore(store.root)
+    notes.recover_owner_feedback(reopened, lambda _: pytest.fail('Render already accepted'),
+                                 tg=tg, owner=OWNER, now=131)
+    assert len(delivered) == 1
+    assert 'Задание №124' in tg.events[-1][1][1]
+    notes.recover_owner_feedback(reopened, lambda _: pytest.fail('Render must not repeat'),
+                                 tg=tg, owner=OWNER, now=132)
+    assert len(tg.events) == 1
+
+
+def test_pending_dialogue_expires_before_consuming_later_voice(saved, monkeypatch):
+    root, store, row, tg = saved
+    draft = notes.begin(store, row['id'], OWNER, 'owner-click')
+    monkeypatch.setattr(notes.time, 'time', lambda: draft['created'] + notes.TTL + 1)
+    service.handle_update(voice(), store, tg, OWNER,
+                          transcriber=lambda *_: pytest.fail('Expired voice must not be transcribed'))
+    assert notes.pending(store, OWNER) is None
+    assert not any(event[0] == 'voice' for event in tg.events)
+    assert 'истекло' in tg.events[-1][1][1]
+
+
+def test_redispatched_begin_callback_keeps_captured_note(saved):
+    root, store, row, tg = saved
+    notes.begin(store, row['id'], OWNER, 'owner-click')
+    draft = notes.capture(store, OWNER, 'Дизельный генератор', 10)
+    repeated = notes.begin(store, row['id'], OWNER, 'owner-click')
+    assert repeated['request_id'] == draft['request_id']
+    assert repeated['notes'] == 'Дизельный генератор'
+
+
+def test_auditor_can_select_card_beyond_first_page(saved, monkeypatch):
+    root, store, row, tg = saved
+    rows = []
+    for job_id in range(200, 214):
+        runtime.register_job(root, job_id, 'kbt', 'Midea', f'MODEL-{job_id}', 'Исходное задание')
+        item = store.submit({**product(), 'product_id': f'fotogen-{job_id}', 'model': f'MODEL-{job_id}'}, picture())
+        store.finish(store.claim(audit_id=item['id']), report('review'))
+        rows.append(item)
+    notes.show_cards(store, tg, OWNER)
+    first = tg.events[-1][1][2]
+    assert len(first) == 13 and first[-1][0]['callback_data'] == 'qf:page:1'
+    service.handle_update(click('page', '1'), store, tg, OWNER)
+    second = tg.events[-1][1][2]
+    assert any(button['callback_data'] == 'qf:begin:' + row['id'] for line in second for button in line)
+
+
+def test_upgrade_does_not_resend_all_legacy_delivered_results(saved):
+    root, store, row, tg = saved
+    notes.begin(store, row['id'], OWNER, 'owner-click')
+    draft = notes.capture(store, OWNER, 'Исправить топливо', 10)
+    item, _ = notes.confirm(store, OWNER, draft['request_id'])
+    item.update(status='delivered', result={'handled': True, 'job_id': 124})
+    notes._save(store, 'outbox:' + draft['request_id'], item)
+    notes.recover_owner_feedback(store, lambda _: pytest.fail('Do not repeat accepted generation'), tg=tg, owner=OWNER)
+    assert not tg.events

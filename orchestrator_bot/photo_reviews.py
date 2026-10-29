@@ -77,6 +77,30 @@ def register(store, value, *, item_key=None):
         if not isinstance(item_key, str) or not 0 < len(item_key) <= 1000:
             raise ValueError('Неверный товар карточки')
         card['item_key'] = item_key
+    if value.get('correction_reference') is not None:
+        encoded = value['correction_reference']
+        fingerprint = value.get('correction_reference_sha256')
+        note, url = value.get('correction_reference_note'), value.get('correction_reference_url')
+        if (not isinstance(encoded, str) or len(encoded) > 4 * ((IMAGE_MAX_BYTES + 2) // 3) or
+                not isinstance(fingerprint, str) or not re.fullmatch('[a-f0-9]{64}', fingerprint) or
+                not isinstance(note, str) or not 0 < len(note) <= 6000 or
+                not isinstance(url, str) or not url.startswith('https://') or len(url) > 2000):
+            raise ValueError('Некорректный эталон исправления')
+        try:
+            data_reference = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError('Повреждён эталон исправления') from exc
+        if len(data_reference) > IMAGE_MAX_BYTES or hashlib.sha256(data_reference).hexdigest() != fingerprint:
+            raise ValueError('Хеш эталона исправления не совпадает')
+        ref_suffix = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp'}[image_mime(data_reference)]
+        ref_folder = store.path.parent / 'photo-review-correction-references'
+        ref_folder.mkdir(parents=True, exist_ok=True)
+        reference_path = ref_folder / (fingerprint + ref_suffix)
+        temporary = reference_path.with_suffix(ref_suffix + '.tmp')
+        temporary.write_bytes(data_reference)
+        temporary.replace(reference_path)
+        card.update(correction_reference_path=str(reference_path), correction_reference_sha256=fingerprint,
+                    correction_reference_note=note, correction_reference_url=url)
     with store._c() as db:
         _schema(db)
         db.execute('BEGIN IMMEDIATE')
@@ -87,6 +111,20 @@ def register(store, value, *, item_key=None):
                 return {'registered': False, 'reason': 'superseded'}
             if old['revision'] == card['revision'] and previous['sha256'] != card['sha256']:
                 raise ValueError('Фото существующей ревизии изменилось')
+            # A report refresh may arrive after PC cleanup. Keep an already
+            # mirrored, hash-checked source for the same immutable card.
+            if previous['sha256'] == card['sha256']:
+                for prefix, source_folder in [('supplier', 'photo-review-suppliers'),
+                                              ('correction_reference', 'photo-review-correction-references')]:
+                    if card.get(prefix + '_path') or not previous.get(prefix + '_path'):
+                        continue
+                    source = Path(previous[prefix + '_path'])
+                    if (source.parent.resolve() == (store.path.parent / source_folder).resolve() and
+                            source.is_file() and not source.is_symlink() and source.stat().st_size <= IMAGE_MAX_BYTES and
+                            hashlib.sha256(source.read_bytes()).hexdigest() == previous.get(prefix + '_sha256')):
+                        for key, item in previous.items():
+                            if key.startswith(prefix + '_'):
+                                card[key] = item
         if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != value['sha256']:
             temporary = path.with_suffix(suffix + '.tmp')
             temporary.write_bytes(data)
@@ -95,7 +133,7 @@ def register(store, value, *, item_key=None):
                    'audit_id=excluded.audit_id,revision=excluded.revision,payload=excluded.payload,updated=excluded.updated',
                    (card['job_id'], card['audit_id'], card['revision'], json.dumps(card, ensure_ascii=False), time.time()))
         db.execute('COMMIT')
-    return {'registered': True, 'audit_id': card['audit_id']}
+    return {'registered': True, 'audit_id': card['audit_id'], 'supports_publication': item_key is not None}
 
 
 def get_card(store, audit_id):
@@ -107,14 +145,15 @@ def get_card(store, audit_id):
     return json.loads(row['payload']) if row else None
 
 
-def list_cards(store, keys=None, limit=12):
+def list_cards(store, keys=None, limit=12, offset=0):
     # Batch membership uses exact job IDs when available; the latest-card menu is
     # deliberately independent from publication and cannot approve an old card.
     with store._c() as db:
         _schema(db)
         query = 'SELECT payload FROM photo_reviews ORDER BY job_id DESC'
+        size, start = max(1, min(int(limit), 50)), max(0, int(offset))
         rows = db.execute(query).fetchall() if keys is not None else db.execute(
-            query + ' LIMIT ?', (max(1, min(int(limit), 50)),)).fetchall()
+            query + ' LIMIT ? OFFSET ?', (size, start)).fetchall()
     cards = [json.loads(row['payload']) for row in rows]
     if keys is not None:
         wanted = set(keys)
@@ -124,7 +163,7 @@ def list_cards(store, keys=None, limit=12):
             prefix = 'excel|' + card['brand'].strip().casefold() + '|'
             return any(key == prefix + card['model'].strip().casefold() for key in wanted)
         cards = [card for card in cards if belongs(card)]
-    return cards[:max(1, min(int(limit), 50))]
+    return cards[max(0, int(offset)):max(0, int(offset)) + size] if keys is not None else cards
 
 
 def create_feedback(card, notes, actor_id, request_id):

@@ -33,6 +33,12 @@ def source_model(model):
     An ambiguous or extended SKU must not silently become its shorter variant.
     """
     value = model.casefold()
+    # Supplier freezer titles often repeat the brand and descriptive text. Bind
+    # known Beko RFNK nomenclature to its full explicit SKU, not that prose.
+    freezer_codes = re.findall(r'(?<![a-zа-яё0-9])b[0-9]+rfnk[0-9]+[a-z0-9]*(?:[-_/.][a-z0-9]+)*', value)
+    if freezer_codes and (re.search(r'(?<![a-zа-яё0-9])beko(?![a-zа-яё0-9])', value) or
+                          value.strip() in freezer_codes):
+        return freezer_codes[0] if len(set(freezer_codes)) == 1 else None
     if not re.search(r"(?<![a-zа-яё0-9])(?:tv|телевизор|xiaomi)(?![a-zа-яё0-9])", value):
         return model
     codes = re.findall(
