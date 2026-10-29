@@ -27,7 +27,7 @@ class Factory:
         self._publish_lock=threading.RLock()
 
     def _run(self, *args) -> dict:
-        catalog = args[0] in ('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'publish-audited', 'batch-status', 'publish-keys', 'cancel')
+        catalog = args[0] in ('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'correct-photo', 'photo-review-scope', 'publish-audited', 'batch-status', 'publish-keys', 'cancel')
         module = 'orchestrator_bot.catalog_cli' if catalog else 'content_factory.agent_cli'
         cmd = [self.cf_python, "-m", module, *args]
         # content-factory не установлен пакетом: его юниты задают PYTHONPATH=<root>/src — делаем так же
@@ -92,6 +92,12 @@ class Factory:
 
     def reconcile_photo(self, decision):
         return self._run('resume-photo', '--audit-json', json.dumps(decision, ensure_ascii=False))
+
+    def correct_photo(self, decision):
+        return self._run('correct-photo', '--feedback-json', json.dumps(decision, ensure_ascii=False))
+
+    def photo_review_key(self, job_id):
+        return self._run('photo-review-scope', '--job-id', str(job_id)).get('item_key')
 
     def cancel(self, keys: list[str]) -> dict:
         return self._run('cancel', '--keys-json', json.dumps(keys, ensure_ascii=False))

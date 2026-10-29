@@ -95,6 +95,19 @@ def test_unavailable_service_releases_instead_of_failing_the_job(advisory):
     integration.require_permit(root, 'fotogen-7', path)
 
 
+def test_explicit_owner_correction_does_not_authorize_an_extra_paid_repair(advisory, monkeypatch):
+    from photo_auditor import runtime
+    monkeypatch.setattr(runtime, 'load', lambda root: {'api_token': 'test'})
+    root, path = advisory
+    runtime.register_job(root, 7, 'kbt', 'Midea', 'ABC-12-RU',
+                         'OWNER_CORRECTION_REQUEST_ID=' + 'a' * 32 + '\nУбрать неверную подпись')
+    async def forbidden(_):
+        pytest.fail('An extra paid repair was not authorized')
+    result, calls = run_hook(root, path, ['regenerate'], forbidden)
+    assert result == path and len(calls) == 1
+    integration.require_permit(root, 'fotogen-7', path)
+
+
 def test_failed_source_only_repair_releases_unchanged_saved_file(advisory):
     root, path = advisory
     original = path.read_bytes()

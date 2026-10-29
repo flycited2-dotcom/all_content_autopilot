@@ -44,6 +44,7 @@ def batch_buttons(batch: dict, now: float) -> list:
     when = _when(batch["publish_at"], now)
     label = f"✅ Опубликовать пачкой {when}" if when else "✅ Опубликовать пачкой сейчас"
     return [[{"text": label, "callback_data": f"b:p:{batch['log_id']}"}],
+            [{"text": "✏️ Указать ошибку в карточке", "callback_data": f"pf:list:{batch['log_id']}"}],
             [{"text": "❌ Не публиковать", "callback_data": f"b:x:{batch['log_id']}"}]]
 
 

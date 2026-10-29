@@ -85,7 +85,8 @@ def drafts_line(summary: dict) -> str:
 
 BTN_STATUS, BTN_REPORT, BTN_WIZARD ="📋 Статус", "🧾 Сводка", "🛠 Мастер задач"
 BTN_CATALOG = '📚 Каталоги и товары'
-MAIN_KEYBOARD = [[BTN_STATUS, BTN_REPORT], [BTN_CATALOG, BTN_WIZARD]]
+BTN_PHOTO_FEEDBACK = '📝 Ошибка в карточке'
+MAIN_KEYBOARD = [[BTN_STATUS, BTN_REPORT], [BTN_CATALOG, BTN_WIZARD], [BTN_PHOTO_FEEDBACK]]
 BOT_COMMANDS = [("status", "Статус завода и контент-агента"), ("report", "Сводка за день"),
                 ("menu", "Показать кнопки"), ('catalog', 'Каталоги, источники и выбор товаров')]
 
@@ -147,13 +148,35 @@ def _take_note(deps, chat_id, text) -> str | None:
     row = deps.store.get_draft(int(note["n"]))
     if row is None:
         return text
-    if note["kind"] == "visual":
+    if text.strip().casefold() in ('/cancel', 'отмена'):
+        deps.tg.send(chat_id, 'Исправление отменено.')
+        return None
+    if note.get('image_job') is not None and note['image_job'] != row.get('image_job'):
+        deps.tg.send(chat_id, 'Карточка уже изменилась. Нажмите «Указать ошибку» под актуальной версией.')
+        return None
+    if note["kind"] in ("visual", "correction"):
+        if len(text.strip()) > 2000:
+            deps.store.set_meta(AWAIT_NOTE, raw)
+            deps.tg.send(chat_id, 'Замечание длиннее 2000 символов. Сократите его или напишите /cancel.')
+            return None
+        if note['kind'] == 'correction':
+            note.update(notes=text.strip(), phase='confirm')
+            deps.store.set_meta(AWAIT_NOTE, json.dumps(note, ensure_ascii=False))
+            deps.tg.send(chat_id, f"Замечание к «{row['title']}»:\n\n{text}\n\n"
+                         'По кнопке передам замечание дизайнеру и запущу новую картинку. Публикация не запускается.',
+                         [[{'text': '🔄 Исправить по замечанию', 'callback_data': f"d:g:{row['n']}"}],
+                          [{'text': 'Отмена', 'callback_data': f"d:h:{row['n']}"}]])
+            return None
         deps.tg.send(chat_id, drafts.redo_visual(deps.store, deps.factory, row["n"], text, deps.tg, chat_id))
         return None
     return f"{text}\n[ответ на черновик id: {row['id']}]"
 
 
-def _queue(deps, chat_id, tg_message_id, kind, text):
+def _queue(deps, chat_id, tg_message_id, kind, text, *, raw_text=None, reply_message_id=None):
+    from orchestrator_bot import photo_feedback_ui
+    if photo_feedback_ui.take_note(deps, chat_id, text if raw_text is None else raw_text,
+                                   reply_message_id=reply_message_id, message_id=tg_message_id):
+        return
     from orchestrator_bot.selection_ui import handle_count
     if handle_count(deps, chat_id, tg_message_id, text):
         return
@@ -175,6 +198,8 @@ def _voice(deps, chat_id, message):
             hint = build_hint(deps.factory.hint())
         except Exception:
             hint = build_hint({})
+        from orchestrator_bot import photo_feedback_ui
+        hint += photo_feedback_ui.voice_hint(deps)
         text = (deps.transcriber(deps.tg.download_voice(message["voice"]["file_id"]), hint) or "").strip()
     except Exception:
         log.exception("расшифровка голосового не удалась")
@@ -183,7 +208,8 @@ def _voice(deps, chat_id, message):
         deps.tg.edit(chat_id, mid, NOT_HEARD)
         return
     deps.tg.edit(chat_id, mid, f"🎙 Услышал: {text}")
-    _queue(deps, chat_id, message["message_id"], "voice", _with_reply_context(message, text))
+    _queue(deps, chat_id, message["message_id"], "voice", _with_reply_context(message, text), raw_text=text,
+           reply_message_id=(message.get('reply_to_message') or {}).get('message_id'))
 
 
 def _photo(deps, chat_id, message):
@@ -250,6 +276,9 @@ def _callback(deps, cq):
     elif data.startswith('s:'):
         from orchestrator_bot.selection_ui import handle_callback
         handle_callback(deps, chat_id, cq)
+    elif data.startswith('pf:'):
+        from orchestrator_bot import photo_feedback_ui
+        photo_feedback_ui.callback(deps, chat_id, data)
     elif data == "m:report":
         _report(deps, chat_id)
     elif data == "w:start":
@@ -276,12 +305,42 @@ def _callback(deps, cq):
             drafts.reject(deps.store, deps.tg, chat_id, int(n))
         elif op == "i":
             drafts.retry_image(deps.store, deps.factory, deps.tg, chat_id, int(n))
-        elif op in ("v", "e"):                       # следующее сообщение владельца — пожелание к этому черновику
+        elif op in ('g', 'h'):
+            try:
+                note = json.loads(deps.store.get_meta(AWAIT_NOTE) or '{}')
+            except ValueError:
+                note = {}
+            row = deps.store.get_draft(int(n))
+            if (not row or note.get('kind') != 'correction' or note.get('n') != int(n) or
+                    note.get('phase') != 'confirm' or deps.clock() - note.get('ts', 0) > AWAIT_NOTE_TTL):
+                deps.tg.send(chat_id, 'Это подтверждение больше не действует. Укажите ошибку под актуальной карточкой.')
+                return
+            deps.store.set_meta(AWAIT_NOTE, '')
+            if op == 'h':
+                deps.tg.send(chat_id, 'Исправление отменено. Новая картинка не заказывалась.')
+            elif row.get('image_job') != note.get('image_job'):
+                deps.tg.send(chat_id, 'Карточка уже изменилась. Нажмите «Указать ошибку» под актуальной версией.')
+            else:
+                deps.tg.send(chat_id, drafts.redo_visual(deps.store, deps.factory, row['n'], note['notes'], deps.tg, chat_id))
+        elif op in ("v", "e", "f"):                  # следующее сообщение владельца — пожелание к этому черновику
             row = deps.store.get_draft(int(n))
             if row is None:
                 return
-            kind = "visual" if op == "v" else "text"
-            deps.store.set_meta(AWAIT_NOTE, json.dumps({"kind": kind, "n": row["n"], "ts": deps.clock()}))
+            if op == 'f' and (row['status'] not in ('ready', 'visual_failed') or
+                    row.get('control_message_id') and row['control_message_id'] != cq['message']['message_id']):
+                deps.tg.send(chat_id, 'Эта версия уже не принимает исправления. Откройте актуальную карточку.')
+                return
+            kind = 'correction' if op == 'f' else ("visual" if op == "v" else "text")
+            from orchestrator_bot import photo_feedback_ui
+            photo_feedback_ui.dismiss_pending(deps.store)
+            deps.store.set_meta(AWAIT_NOTE, json.dumps({"kind": kind, "n": row["n"], "ts": deps.clock(),
+                                                       'image_job': row.get('image_job')}))
+            if op == 'f':
+                deps.tg.send(chat_id, f"Напишите или надиктуйте, что неверно в карточке «{row['title']}» "
+                             "и как должно быть. Передам замечание дизайнеру вместе с предыдущим заданием. "
+                             "Например: «Это дизельный генератор, убери бензин». "
+                             "Сначала покажу текст, затем нужно подтвердить переделку кнопкой. Отмена — /cancel.")
+                return
             what = "картинке" if kind == "visual" else "тексте"
             deps.tg.send(chat_id, f"Напишите или надиктуйте, что изменить в {what} «{row['title']}».")
     elif data.startswith("c:"):
@@ -320,7 +379,8 @@ def _callback(deps, cq):
 def handle_update(update: dict, deps: Deps) -> None:
     if "callback_query" in update:
         cq = update["callback_query"]
-        if cq.get("from", {}).get("id") != deps.owner_chat_id:
+        if (cq.get("from", {}).get("id") != deps.owner_chat_id or
+                cq.get('message', {}).get('chat', {}).get('id') != deps.owner_chat_id):
             return
         _callback(deps, cq)
         return
@@ -352,8 +412,12 @@ def handle_update(update: dict, deps: Deps) -> None:
         _wizard(deps, chat_id)
     elif command == '/catalog' or text == BTN_CATALOG:
         _catalog(deps, chat_id)
+    elif text == BTN_PHOTO_FEEDBACK:
+        from orchestrator_bot import photo_feedback_ui
+        photo_feedback_ui.list_cards(deps, chat_id)
     else:
-        _queue(deps, chat_id, message["message_id"], "text", _with_reply_context(message, text))
+        _queue(deps, chat_id, message["message_id"], "text", _with_reply_context(message, text), raw_text=text,
+               reply_message_id=(message.get('reply_to_message') or {}).get('message_id'))
 
 
 def offline_alert(deps: Deps, now: float) -> None:

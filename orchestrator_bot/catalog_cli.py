@@ -69,8 +69,10 @@ def enqueue(cf, args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'publish-audited', 'batch-status', 'publish-keys', 'cancel'))
+    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'correct-photo', 'photo-review-scope', 'publish-audited', 'batch-status', 'publish-keys', 'cancel'))
     parser.add_argument('--audit-json')
+    parser.add_argument('--feedback-json')
+    parser.add_argument('--job-id', type=int)
     parser.add_argument('--supplier-file')
     for name in ('state-db', 'prices-dir', 'queue-db', 'category', 'source', 'quotas', 'btu',
                  'keys-json', 'due'):
@@ -81,7 +83,7 @@ def main(argv=None):
     for flag in ('inverter', 'heat-pump', 'full-dc', 'no-wake'):
         parser.add_argument('--' + flag, action='store_true')
     args = parser.parse_args(argv)
-    if args.command not in ('hint', 'enqueue-supplier', 'resume-photo', 'publish-audited', 'batch-status', 'publish-keys', 'cancel') and not args.category:
+    if args.command not in ('hint', 'enqueue-supplier', 'resume-photo', 'correct-photo', 'photo-review-scope', 'publish-audited', 'batch-status', 'publish-keys', 'cancel') and not args.category:
         parser.error('--category is required')
     if args.command == 'enqueue-supplier' and not args.supplier_file:
         parser.error('--supplier-file is required')
@@ -91,6 +93,12 @@ def main(argv=None):
         result = run(cf, args)
     elif args.command in ('batch-status', 'publish-keys', 'cancel'):
         from orchestrator_bot.key_commands import run
+        result = run(cf, args)
+    elif args.command == 'photo-review-scope':
+        from orchestrator_bot.photo_correction import review_scope
+        result = review_scope(cf, args)
+    elif args.command == 'correct-photo':
+        from orchestrator_bot.photo_correction import run
         result = run(cf, args)
     elif args.command=='publish-audited':
         from orchestrator_bot.photo_publication import run

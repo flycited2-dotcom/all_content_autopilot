@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 import sqlite3
 from pathlib import Path
@@ -95,6 +96,13 @@ async def checked_output(root, product_id, brand, model, generated_path, supplie
     # The auditor helps the factory: in advisory mode only a confirmed discrepancy
     # may delay the file (bounded repairs); anything else passes on with notes.
     repairs = min(mode['repairs'], MAX_REGENERATIONS) if advisory else MAX_REGENERATIONS
+    # A confirmed owner correction authorizes one new render, not an extra
+    # automatic series of paid repairs of that newly created card.
+    from photo_auditor.runtime import content_brief
+    brief = content_brief(root, {'product_id': product_id, 'brand': brand, 'model': model,
+                                 'revision': start_revision})
+    if brief and re.match(r'^OWNER_CORRECTION_REQUEST_ID=[a-f0-9]{32}(?:\n|$)', brief['specs']):
+        repairs = 0
     if advisory:
         timeout = min(timeout, mode['wait_seconds'])
     headers = {"X-Audit-Token": config["api_token"]}

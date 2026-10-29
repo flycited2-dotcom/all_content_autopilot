@@ -37,7 +37,8 @@ def main():
                  'Принятие без публикации оставит его в группе проверки.')
         keyboard=[[{'text':'✅ Подтвердить и опубликовать в канал','callback_data':f"qa:publish:{row['id']}"}],
                   [{'text':'✅ Принять без публикации','callback_data':f"qa:approve:{row['id']}"}],
-                  [{'text':'🔄 Перепроверить / исправить','callback_data':f"qa:recheck:{row['id']}"}]]
+                  [{'text':'🔎 Перепроверить фото','callback_data':f"qa:recheck:{row['id']}"}],
+                  [{'text':'✏️ Указать ошибку','callback_data':f"qf:begin:{row['id']}"}]]
         message_id=tg.send_photo(owner,store.root/row['id']/'generated.bin',caption=caption,keyboard=keyboard)
         receipts.append({'audit_id':row['id'],'product_id':row['product_id'],'message_id':message_id})
     folder=ROOT/'runs/2026-10-27/owner-controls';folder.mkdir(parents=True,exist_ok=True)

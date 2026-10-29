@@ -267,7 +267,9 @@ def notify(store, tg, owner):
         parts = list(text_chunks(text))
         keyboard = [[{'text': title, 'callback_data': f"qa:{code}:{row['id']}"}]
                     for title, code in [('✅ Принять без публикации', 'approve'),
-                                        ('🔄 Перепроверить / исправить', 'recheck')]]
+                                        ('🔎 Перепроверить фото', 'recheck')]]
+        if generated_job:
+            keyboard.append([{'text': '✏️ Указать ошибку', 'callback_data': f"qf:begin:{row['id']}"}])
         from photo_auditor.runtime import content_brief
         try:
             publishable=content_brief(store.root.parent.parent,row['product']) is not None
@@ -347,10 +349,13 @@ def recover_pipeline(store, deliver=None):
             break
 
 
-def handle_update(update, store, tg, owner):
+def handle_update(update, store, tg, owner, *, transcriber=None):
     callback = update.get('callback_query')
     if callback:
         if callback.get('from', {}).get('id') != owner or callback.get('message', {}).get('chat', {}).get('id') != owner:
+            return
+        from photo_auditor.owner_feedback import handle_callback
+        if handle_callback(callback, store, tg, owner):
             return
         data = callback.get('data', '').split(':')
         if len(data) == 3 and data[0] == 'qa' and re.fullmatch('[a-f0-9]{32}', data[2]):
@@ -377,11 +382,11 @@ def handle_update(update, store, tg, owner):
                     if not accepted:
                         raise ValueError('Проверка уже выполняется или исправление уже передано генератору.')
                     store.consumer_waiting(row['id'])
-                    message='🔄 Сохранённое фото поставлено на повторную проверку. При подтверждённом дефекте аудитор передаст замечания генератору.'
+                    message='🔎 Сохранённое фото поставлено на повторную проверку. Чтобы объяснить ошибку и заказать исправление карточки, нажмите «Указать ошибку» под её последним отчётом.'
                 else:
                     saved=store.feedback(data[2],data[1])
                     if not saved:raise ValueError('Проверка не найдена')
-                    message='Оценка сохранена. Для действия используйте «Подтвердить и продолжить» или «Перепроверить / исправить» под последним фото.'
+                    message='Оценка сохранена. Для действия используйте «Принять без публикации», «Перепроверить фото» или «Указать ошибку» под последним фото.'
             except (ValueError,OSError,AuditHold) as exc:
                 message='Решение не применено: '+str(exc)
                 old=store.get(data[2])
@@ -389,7 +394,13 @@ def handle_update(update, store, tg, owner):
                 if latest and latest['id']!=old['id'] and latest['report']:
                     with store.connect() as db:
                         db.execute('UPDATE audits SET notified=0 WHERE id=?',(latest['id'],))
-            tg.send(owner,message)
+            keyboard = None
+            if data[1] == 'recheck':
+                row = store.get(data[2])
+                if row:
+                    latest = store.latest(row['product_id'])
+                    keyboard = [[{'text': '✏️ Указать ошибку', 'callback_data': 'qf:begin:' + latest['id']}]]
+            tg.send(owner, message, keyboard)
             try:
                 tg.clear_buttons(owner,callback['message']['message_id'])
             except Exception:
@@ -397,6 +408,9 @@ def handle_update(update, store, tg, owner):
         return
     message = update.get("message") or {}
     if message.get("from", {}).get("id") != owner or message.get("chat", {}).get("id") != owner:
+        return
+    from photo_auditor.owner_feedback import handle_message
+    if handle_message(message, store, tg, owner, transcriber=transcriber):
         return
     text = (message.get("text") or "").strip()
     if text in ("/start", "/help"):
@@ -407,7 +421,9 @@ def handle_update(update, store, tg, owner):
                            "но не останавливаю конвейер. Подтверждённое расхождение — исправлений генератором: "
                            f"{mode['repairs']}; "
                            "сомнения и сбои — фото идёт в превью с пометкой, публикуете вы. "
-                           "Отправьте фото с подписью «Бренд | Модель» для ручной проверки. /status — очередь.")
+                           "Отправьте фото с подписью «Бренд | Модель» для ручной проверки. /status — очередь. "
+                           "«Указать ошибку» под карточкой принимает текст или голосовое замечание; "
+                           "новая генерация — только после отдельного подтверждения. /fix — выбрать карточку для исправления.")
             return
         tg.send(owner, "Я проверяю фотографии по точной номенклатуре. Отправьте фото с подписью «Бренд | Модель» "
                        "или подключите фотоагент. /status — очередь и причины ожидания. "
@@ -416,6 +432,11 @@ def handle_update(update, store, tg, owner):
     elif text == "/status":
         for part in text_chunks(status_text(store)):
             tg.send(owner, part)
+        tg.send(owner, 'Для исправления с объяснением выберите карточку:',
+                [[{'text': '✏️ Указать ошибку в карточке', 'callback_data': 'qf:list:all'}]])
+    elif text in ('/fix', '/feedback'):
+        from photo_auditor.owner_feedback import show_cards
+        show_cards(store, tg, owner)
     elif text.split(maxsplit=1)[0:1] == ['/retry']:
         parts = text.split()
         if len(parts) != 2 or not re.fullmatch('[a-f0-9]{32}', parts[1]):
@@ -464,13 +485,19 @@ def run_bot(store, tg, owner, stop):
 
 def maintenance_loop(store, tg, owner, stop):
     """Slow recovery/photo delivery cannot block the owner's Telegram buttons."""
+    from photo_auditor.owner_feedback import recover_owner_feedback
+    from photo_auditor.review_sync import sync
     while not stop.is_set():
-        try:
-            recover_pipeline(store)
-            recover_publications(store,tg=tg,owner=owner)
-            notify(store,tg,owner)
-        except Exception as exc:
-            log.warning('Доставка результатов отложена: %s',type(exc).__name__)
+        stages = [('Синхронизация карточек', lambda: sync(store)),
+                  ('Отправка замечаний', lambda: recover_owner_feedback(store, tg=tg, owner=owner)),
+                  ('Возврат заданий', lambda: recover_pipeline(store)),
+                  ('Подтверждённая публикация', lambda: recover_publications(store, tg=tg, owner=owner)),
+                  ('Доставка отчётов', lambda: notify(store, tg, owner))]
+        for name, action in stages:
+            try:
+                action()
+            except Exception as exc:
+                log.warning('%s отложена: %s', name, type(exc).__name__)
         stop.wait(3)
 
 

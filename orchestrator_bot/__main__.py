@@ -44,6 +44,11 @@ def main(argv=None) -> int:
     store = Store(settings.db_path)
     factory = Factory(settings.cf_python, settings.cf_root)
     tg = TelegramApi(settings.bot_token)
+    voice_model = Transcriber(settings.whisper_model)
+    voice_lock = threading.Lock()
+    def transcriber(audio, hint):
+        with voice_lock:
+            return voice_model(audio, hint)
     if mode == "report":
         tg.send(settings.owner_chat_id, _report_text(store, factory))
         return 0
@@ -53,13 +58,13 @@ def main(argv=None) -> int:
     send = lambda text, keyboard=None: tg.send(settings.owner_chat_id, text, keyboard)  # noqa: E731
     on_draft = lambda draft: drafts.submit(store, factory, tg, settings.owner_chat_id, draft)  # noqa: E731
     server = make_server(store, factory, send, settings.api_token, settings.api_port, settings.doubt_threshold,
-                         on_draft=on_draft)
+                         on_draft=on_draft, on_transcribe=transcriber)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         tg.set_commands(bot.BOT_COMMANDS)              # меню команд у кнопки «Меню» рядом с полем ввода
     except Exception:
         logging.getLogger("orchestrator_bot").exception("setMyCommands")
-    deps = bot.Deps(store=store, tg=tg, transcriber=Transcriber(settings.whisper_model), factory=factory,
+    deps = bot.Deps(store=store, tg=tg, transcriber=transcriber, factory=factory,
                     owner_chat_id=settings.owner_chat_id, threshold=settings.doubt_threshold,
                     report_fn=lambda: _report_text(store, factory))
     bot.run_forever(deps)

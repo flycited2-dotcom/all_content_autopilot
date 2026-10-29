@@ -33,7 +33,8 @@ def buttons(n: int, channel: str, publish_at: float | None = None) -> list:
     return [[{"text": f"✅ Опубликовать {where}", "callback_data": f"d:p:{n}"},
              {"text": "❌ Отклонить", "callback_data": f"d:r:{n}"}],
             [{"text": "🖼 Другая картинка", "callback_data": f"d:v:{n}"},
-             {"text": "✏️ Править текст", "callback_data": f"d:e:{n}"}]]
+             {"text": "✏️ Править текст", "callback_data": f"d:e:{n}"}],
+            [{"text": "✏️ Указать ошибку", "callback_data": f"d:f:{n}"}]]
 
 
 def retry_buttons(n: int) -> list:
@@ -189,8 +190,16 @@ def redo_visual(store, factory, key, notes: str, tg=None, chat_id=None) -> str:
     row = store.get_draft(key)
     if row is None or row["status"] not in ("ready", "visual_failed"):
         return _already(row)
-    base_prompt = row["visual_prompt"] or row["title"]
-    scene = f"{base_prompt}. {WISH_MARKER}: {notes.strip()}"[:1500]
+    # Keep the newest correction intact. Appending it after an already long
+    # prompt and truncating the result used to silently discard the correction.
+    notes = notes.strip()
+    if not notes or len(notes) > 2000:
+        return "Напишите замечание от 1 до 2000 символов — оно должно целиком попасть дизайнеру."
+    base_prompt = row["visual_prompt"] or row["title"] or row["text"][:300]
+    scene = (f"{WISH_MARKER}: {notes}\n"
+             "Исправь указанную ошибку предыдущей версии. Новое замечание имеет приоритет "
+             "при противоречии с прежними пожеланиями; остальные требования сохрани.\n"
+             f"Предыдущее задание: {base_prompt[:1800]}")
     store.update_draft(row["n"], visual_prompt=scene)
     if tg is not None:
         _clear(tg, chat_id, row)

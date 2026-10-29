@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import binascii
 import logging
 import threading
 import time
@@ -82,7 +84,7 @@ def _failed(what, exc) -> str:
 
 
 def make_server(store, factory, send, token, port, threshold=40, clock=time.time,
-                on_draft=None) -> ThreadingHTTPServer:
+                on_draft=None, on_transcribe=None) -> ThreadingHTTPServer:
     intent_lock = threading.RLock()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):          # без журнала запросов в stderr
@@ -148,6 +150,27 @@ def make_server(store, factory, send, token, port, threshold=40, clock=time.time
             if bad is not None:
                 return self._json(400, {"error": str(bad)})
             try:
+                if self.path == '/photo-feedback-transcribe' and on_transcribe is not None:
+                    audio, hint = body.get('audio'), body.get('hint', '')
+                    if (not isinstance(audio, str) or not 0 < len(audio) <= 14 * 1024 * 1024 or
+                            not isinstance(hint, str) or len(hint) > 1000):
+                        raise ValueError('Некорректное голосовое замечание')
+                    try:
+                        data = base64.b64decode(audio, validate=True)
+                    except (ValueError, binascii.Error) as exc:
+                        raise ValueError('Повреждено голосовое замечание') from exc
+                    if not 0 < len(data) <= 10 * 1024 * 1024:
+                        raise ValueError('Голосовое замечание слишком большое')
+                    return self._json(200, {'text': on_transcribe(data, hint)})
+                if self.path == '/photo-reviews':
+                    from orchestrator_bot.photo_reviews import register, _identity
+                    _identity(body)
+                    item_key = factory.photo_review_key(body['job_id']) if hasattr(factory, 'photo_review_key') else None
+                    return self._json(200, register(store, body, item_key=item_key))
+                if self.path == '/photo-feedback':
+                    from orchestrator_bot.photo_reviews import correct
+                    with intent_lock:
+                        return self._json(200, correct(store, factory, body))
                 if self.path == '/photo-audit-publish':
                     from orchestrator_bot.photo_recovery import validate
                     return self._json(200,factory.publish_audited(validate(body)))
