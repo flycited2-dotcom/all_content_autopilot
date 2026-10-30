@@ -17,9 +17,16 @@ def execute(outcome: Outcome, factory, store, msg_id, *, source_suffix="", suppl
         from orchestrator_bot.supplier_inventory import normalize_inventory, render
         inventory = normalize_inventory(outcome.action['inventory'])
         statuses = factory.supplier_photo_status(inventory).get('statuses', [])
-        from orchestrator_bot.existing_cards import notice, pricing
-        report = notice(inventory, statuses, supplier_pricing or pricing(store.get_message(msg_id)))
-        return Result(outcome, render(inventory, statuses), notices=[report] if report else [])
+        from orchestrator_bot.existing_cards import pricing
+        from orchestrator_bot import price_review
+        policy = supplier_pricing or pricing(store.get_message(msg_id))
+        ticket = price_review.prepare(store, msg_id, inventory, statuses, policy)
+        report, keyboard = (price_review.render(ticket, price_review.get_rule(store))
+                            if ticket and price_review.requires_attention(ticket, price_review.get_rule(store)) else (None, []))
+        text = render(inventory, statuses, source_price_label=('готовая цена из прайса' if policy['markup_percent']=='0' else 'входящая'))
+        if ticket and not report:
+            text += '\nПроверка цен: изменений для решения нет; старые карточки сохранены по действующему правилу.'
+        return Result(outcome, text, notices=[report] if report else [], notice_keyboard=keyboard)
     if kind == "enqueue_supplier_products":
         import hashlib
         import json
@@ -48,6 +55,7 @@ def execute(outcome: Outcome, factory, store, msg_id, *, source_suffix="", suppl
             return Result(outcome, 'Новая генерация не запущена. Статус каждой позиции указан в разборе фото.'
                           if supplier_inventory is not None else
                           'Новая генерация не запущена: сервер не принял позиции. Это не подтверждает, что карточки уже готовы.')
+        result = {**result, 'manual_generation_id': f'telegram:{msg_id}:{digest}'}
         # Use the same batch/cancel/publication controls as catalog products.
         existing = store.find_supplier_selection(msg_id, action, result.get("manifest_path"))
         log_id = existing["id"] if existing else store.log_action(msg_id, "enqueue", action, result)

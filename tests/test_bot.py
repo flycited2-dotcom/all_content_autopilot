@@ -243,7 +243,7 @@ def test_menu_installs_persistent_reply_keyboard(deps):
     bot.handle_update(_msg("/start"), deps)
     reply_keyboard = deps.tg.calls[-1][4]
     assert [b for row in reply_keyboard for b in row] == ["📋 Статус", "🧾 Сводка", '📚 Каталоги и товары',
-                                                        "🛠 Мастер задач", '📝 Ошибка в карточке']
+                                                        "🛠 Мастер задач", '📝 Ошибка в карточке', '💰 Проверка цен']
 
 
 def test_reply_keyboard_buttons_work_without_queue(deps):

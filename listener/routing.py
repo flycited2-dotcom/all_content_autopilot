@@ -129,16 +129,82 @@ class ModelRouter:
         return bool(re.search(r'фото|снимк|прайс|изображени|на картин|эти(?:х|м)? товар', text))
 
     @staticmethod
-    def _inventory_intent(intent, inventory):
+    def _generic_document_dispatch(message, inventory):
+        """A literal generic file order with final prices needs no invented scope."""
+        from orchestrator_bot.existing_cards import pricing
+        if not message.get('document') or pricing(message)['markup_percent'] != '0' or not inventory['complete']:
+            return None
+        text = str(message.get('text', '')).casefold()
+        if not (re.search(r'постав[ьи]|отправ[ьи]|запусти', text) and re.search(r'генераци', text)):
+            return None
+        # Named brands, product groups, quantities or exclusions belong to the
+        # decision model; never expand a narrower request to the whole file.
+        if re.search(r'\d|только|кроме|исключ|первые|несколько|часть|выбер|генератор|пил[аыу]|горел|пушк|тепловент|автомат|блок|холодиль|телевизор|кондиционер|косил', text):
+            return None
+        brands = {row['brand'] for row in inventory['rows'] if row.get('brand')}
+        if any(re.search(r'(?<!\w)' + re.escape(brand.casefold()) + r'(?!\w)', text) for brand in brands):
+            return None
+        items = [{key: row[key] for key in ('name', 'brand', 'model', 'cost_price', 'stock', 'attachment_index')}
+                 for row in inventory['rows'] if
+                 row.get('name') and len(row['name']) <= 500 and row.get('brand') and row.get('model') and
+                 row.get('cost_price') is not None and row.get('stock') is not None and row['stock'] > 0]
+        return ({'type': 'enqueue_supplier_products', 'category': 'товары из прайса',
+                 'markup_percent': '0', 'items': items} if items else None)
+
+    @staticmethod
+    def _inventory_intent(intent, inventory, message=None):
         """The source table is mandatory; a model cannot replace it with a history summary."""
         from orchestrator_bot.supplier_inventory import validate_selection
         actions = [{'type': 'inspect_supplier_photo', 'inventory': inventory}]
+        from orchestrator_bot.supplier_import import _identity
+        from orchestrator_bot.existing_cards import pricing
+        from decimal import Decimal
+        source_by_key, conflicts, skipped = {}, set(), set()
+        for row in inventory['rows']:
+            if row.get('brand') and row.get('model'):
+                key = (_identity(row['brand']), re.sub(r'\s+', '', _identity(row['model'])))
+                fact = (Decimal(row['cost_price']) if row.get('cost_price') is not None else None, row.get('stock'))
+                if key in source_by_key and source_by_key[key] != fact:
+                    conflicts.add(key)
+                source_by_key[key] = fact
+        generated, attempted = False, False
         for action in intent['actions']:
             if action['type'] == 'ask':
                 actions.append(action)
             elif action['type'] == 'enqueue_supplier_products' and inventory['complete']:
+                attempted = True
+                # First bind all proposed facts. Filtering a contradictory SKU
+                # must not turn an invented price for another row into trust.
                 validate_selection(action, inventory)
-                actions.append(action)
+                selected = []
+                for item in action['items']:
+                    key = (_identity(item['brand']), re.sub(r'\s+', '', _identity(item['model'])))
+                    if key in conflicts:
+                        skipped.add(' '.join((item['brand'], item['model'])))
+                    else:
+                        selected.append(item)
+                if selected:
+                    clean = {**action, 'items': selected}
+                    # An explicit instruction to use existing final prices
+                    # overrides an accidentally repeated markup from history.
+                    if pricing(message)['markup_percent'] == '0':
+                        clean['markup_percent'] = '0'
+                    actions.append(clean)
+                    generated = True
+        if attempted:
+            for row in inventory['rows']:
+                if (not row.get('brand') or not row.get('model') or row.get('cost_price') is None or row.get('stock') is None):
+                    skipped.add(row.get('name') or f"Строка {row['row_index']}")
+            if skipped:
+                labels = sorted(skipped)
+                question = ('Отдельно требуют уточнения и не отправлены: ' + '; '.join(labels[:5]))[:850]
+                if len(labels) > 5:
+                    question += f'; ещё {len(labels)-5}.'
+                question += ' Проверьте бренд/модель, цену и остаток.'
+                question += (' Остальные подходящие позиции переданы отдельно.' if generated else
+                             ' Подтверждённых позиций для отдельного запуска не осталось.')
+                actions.append({'type': 'ask', 'question': question,
+                                'options': ['Уточню строки', 'Пропустить строки', 'Отмена']})
         return validated_intent({'reply': '', 'actions': actions})
 
     def _save(self):
@@ -267,8 +333,19 @@ class ModelRouter:
                         # new reading, or treat source prose as owner commands.
                         payload['message']['document'].pop('text', None)
                     payload['context']['supplier_inventory'] = inventory
+                    from orchestrator_bot.existing_cards import pricing
+                    payload['context']['supplier_dispatch_policy'] = {
+                        **pricing(payload['message']),
+                        'rule': ('Полнота списка подтверждена отдельно от готовности каждой строки. '
+                                 'При просьбе о генерации передай все строки с известными брендом, моделью, ценой '
+                                 'и положительным остатком; непрочитанные строки уточни отдельным ask. '
+                                 'Если markup_percent равен 0, владелец прямо запретил дополнительную наценку; '
+                                 'не спрашивай о ней снова. Цены/остатки из supplier_inventory не изменяй.')}
                     if not inventory['complete']:
                         return {'reply': '', 'actions': [{'type': 'inspect_supplier_photo', 'inventory': inventory}]}
+                    direct = self._generic_document_dispatch(payload['message'], inventory)
+                    if direct is not None:
+                        return self._inventory_intent({'reply': '', 'actions': [direct]}, inventory, payload['message'])
             elif self._photo_task(payload):
                 inventory = self._photo_inventory(payload)
                 payload = copy.deepcopy(payload)
@@ -302,7 +379,7 @@ class ModelRouter:
                     intent = validated_intent(value)
                     inventory = payload.get('context', {}).get('supplier_inventory')
                     if inventory:
-                        intent = self._inventory_intent(intent, inventory)
+                        intent = self._inventory_intent(intent, inventory, payload.get('message'))
                     elif payload.get('context', {}).get('supplier_photo_checked') and any(
                             a['type'] in ('enqueue_products', 'enqueue_supplier_products') for a in intent['actions']):
                         label = ('В документе не подтверждён полный прайс. Уточните, какие строки нужно разобрать.'

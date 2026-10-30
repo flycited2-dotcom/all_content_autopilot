@@ -97,8 +97,9 @@ def test_notice_is_a_separate_telegram_message_and_retry_does_not_resend(tmp_pat
     intent = {'reply': '', 'actions': [{'type':'inspect_supplier_photo', 'inventory':inventory()}]}
     response = handle_intent(store, Factory(), lambda *a: sent.append(a), mid, intent)
     assert len(sent) == 2
-    assert 'Эти карточки уже созданы' in sent[0][0] and 'распознано позиций' not in sent[0][0]
-    assert 'распознано позиций' in sent[1][0] and 'Эти карточки уже созданы' not in sent[1][0]
+    assert 'Готовые карточки' in sent[0][0] and 'распознано позиций' not in sent[0][0]
+    assert 'распознано позиций' in sent[1][0] and 'Готовые карточки' not in sent[1][0]
+    assert any('Обновить' in button['text'] for row in sent[0][1] for button in row)
     assert response['notices'] == [sent[0][0]]
     assert store.batches('open') == []
     again = handle_intent(store, Factory(), lambda *a: sent.append(a), mid, intent)
@@ -120,4 +121,4 @@ def test_long_separate_notices_are_chunked_without_missing_rows(tmp_path):
                         {'reply':'','actions':[{'type':'inspect_supplier_photo','inventory':inv}]})
     assert len(sent)>2
     assert all(len(text.encode('utf-16-le'))//2<=3800 for text,buttons in sent)
-    assert all('PPG-'+str(n)+' ' in result['notices'][0] for n in range(1,41))
+    assert all('PPG-'+str(n)+':' in result['notices'][0] for n in range(1,41))

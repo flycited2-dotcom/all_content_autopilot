@@ -198,7 +198,10 @@ def reconcile(first, second):
                         row[field] = None
                         complete = False
                         warnings.append(f'Фото {index + 1}, строка {ordinal}: не совпало поле {field}, нужно уточнение.')
-                if not row['brand'] or not row['model']:
+                # A stable unknown brand/model is an ineligible row, not a
+                # failed count of the rest of the source. A wholly unreadable
+                # row still leaves source completeness unconfirmed.
+                if all(row[field] is None for field in ('name', 'brand', 'model', 'cost_price', 'stock')):
                     complete = False
             merged.append(row)
     return {'rows': merged, 'warnings': list(dict.fromkeys(warnings)), 'complete': complete,

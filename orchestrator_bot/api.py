@@ -78,9 +78,17 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
     text, keyboard = intents.render(reply, results)
     notices = [notice for result in results for notice in result.notices]
     try:
-        for notice in notices:
-            for part in text_chunks(notice):
-                send(part, [])
+        for result in results:
+            for notice in result.notices:
+                chunks = list(text_chunks(notice))
+                for i, part in enumerate(chunks):
+                    mid = send(part, result.notice_keyboard if i == len(chunks)-1 else [])
+                    if mid is not None and result.outcome.kind == 'inspect_supplier_photo':
+                        from orchestrator_bot import price_review
+                        ticket = price_review.get_ticket(store, store.get_meta(price_review.PENDING))
+                        if ticket and ticket['msg_id'] == msg_id:
+                            ticket['message_ids'].append(mid)
+                            price_review._save(store, ticket)
         parts = list(text_chunks(text or "Принял."))
         for n, part in enumerate(parts):
             send(part, keyboard if n == len(parts) - 1 else [])

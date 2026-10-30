@@ -360,7 +360,7 @@ def _number(value):
     return f'{number:,.2f}'.replace(',', ' ').rstrip('0').rstrip('.')
 
 
-def render(inventory, statuses=(), *, filter_brand=None, excluded_models=(), markup_percent=None):
+def render(inventory, statuses=(), *, filter_brand=None, excluded_models=(), markup_percent=None, source_price_label='входящая'):
     """Show extraction and live state on separate lines; filters never omit rows."""
     inventory = normalize_inventory(inventory)
     rows = inventory['rows']
@@ -383,7 +383,7 @@ def render(inventory, statuses=(), *, filter_brand=None, excluded_models=(), mar
         price = _number(row['cost_price']) + ' ₽' if row['cost_price'] is not None else 'не читается'
         stock = str(row['stock']) if row['stock'] is not None else 'не указан/не читается — уточнить'
         title = ' '.join(part for part in (row['brand'], row['model']) if part) or row['name'] or 'Название не прочитано'
-        lines += ['', f"{n}. {title} — входящая {price}; остаток {stock}."]
+        lines += ['', f"{n}. {title} — {source_price_label} {price}; остаток {stock}."]
         state = by_position.get((row['attachment_index'], row['row_index']), {'state': 'unavailable'})
         status = _LABELS.get(state.get('state'), _LABELS['unknown'])
         if state.get('state') == 'failed' and state.get('stage') == 'research':

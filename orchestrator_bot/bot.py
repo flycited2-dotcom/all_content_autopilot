@@ -86,9 +86,11 @@ def drafts_line(summary: dict) -> str:
 BTN_STATUS, BTN_REPORT, BTN_WIZARD ="📋 Статус", "🧾 Сводка", "🛠 Мастер задач"
 BTN_CATALOG = '📚 Каталоги и товары'
 BTN_PHOTO_FEEDBACK = '📝 Ошибка в карточке'
-MAIN_KEYBOARD = [[BTN_STATUS, BTN_REPORT], [BTN_CATALOG, BTN_WIZARD], [BTN_PHOTO_FEEDBACK]]
+BTN_PRICE_REVIEW = '💰 Проверка цен'
+MAIN_KEYBOARD = [[BTN_STATUS, BTN_REPORT], [BTN_CATALOG, BTN_WIZARD], [BTN_PHOTO_FEEDBACK, BTN_PRICE_REVIEW]]
 BOT_COMMANDS = [("status", "Статус завода и контент-агента"), ("report", "Сводка за день"),
-                ("menu", "Показать кнопки"), ('catalog', 'Каталоги, источники и выбор товаров')]
+                ("menu", "Показать кнопки"), ('catalog', 'Каталоги, источники и выбор товаров'),
+                ('prices', 'Решить, что делать с изменением цен')]
 
 
 def _menu(deps, chat_id):
@@ -173,6 +175,10 @@ def _take_note(deps, chat_id, text) -> str | None:
 
 
 def _queue(deps, chat_id, tg_message_id, kind, text, *, raw_text=None, reply_message_id=None):
+    from orchestrator_bot import price_review
+    if price_review.take_text(deps, chat_id, text if raw_text is None else raw_text,
+                              reply_message_id=reply_message_id, message_id=tg_message_id):
+        return
     from orchestrator_bot import photo_feedback_ui
     if photo_feedback_ui.take_note(deps, chat_id, text if raw_text is None else raw_text,
                                    reply_message_id=reply_message_id, message_id=tg_message_id):
@@ -314,7 +320,10 @@ def _callback(deps, cq):
         deps.tg.answer_callback(cq["id"])
     except Exception:                                # «query is too old» — кнопку всё равно исполняем
         log.info("answerCallbackQuery не прошёл", exc_info=True)
-    if data == "m:status":
+    if data.startswith('pr:'):
+        from orchestrator_bot import price_review
+        price_review.callback(deps, chat_id, data)
+    elif data == "m:status":
         deps.tg.send(chat_id, *status_message(deps))
     elif data.startswith('s:'):
         from orchestrator_bot.selection_ui import handle_callback
@@ -468,6 +477,9 @@ def handle_update(update: dict, deps: Deps) -> None:
     elif text == BTN_PHOTO_FEEDBACK:
         from orchestrator_bot import photo_feedback_ui
         photo_feedback_ui.list_cards(deps, chat_id)
+    elif text == BTN_PRICE_REVIEW or command == '/prices':
+        from orchestrator_bot import price_review
+        price_review.open_latest(deps, chat_id)
     else:
         _queue(deps, chat_id, message["message_id"], "text", _with_reply_context(message, text), raw_text=text,
                reply_message_id=(message.get('reply_to_message') or {}).get('message_id'))
