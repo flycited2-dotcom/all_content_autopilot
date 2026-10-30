@@ -217,11 +217,19 @@ def lookup(state_path, queue_path, rows):
             value['state'] = 'unreadable'
             result.append(value)
             continue
+        latest_job = latest.get((_identity(row['brand']), _identity(row['model'])))
+        linked = [item.get(field) for field in ('card_job', 'research_job')
+                  if item and item.get(field) is not None]
+        # A later exact-SKU run can use a cohort key while the canonical
+        # item and its publication decision remain as historical records.
+        # Those records cannot describe the newer job's current state.
+        if latest_job and linked and latest_job['id'] > max(linked):
+            item = None
         if item:
             decision = _current_decision(item, awaiting)
             card_job, research_job = item.get('card_job'), item.get('research_job')
-            stage = 'card' if card_job else 'research' if research_job else None
-            job_id = card_job or research_job
+            job_id = max(linked) if linked else None
+            stage = ('card' if job_id == card_job else 'research') if job_id is not None else None
             job = by_job.get(job_id)
             value.update(origin='factory', item_status=item.get('status'), stage=stage, job_id=job_id)
             if item.get('status') in ('cancelled', 'held'):
@@ -241,7 +249,7 @@ def lookup(state_path, queue_path, rows):
             else:
                 value['state'] = 'unknown'
         else:
-            job = latest.get((_identity(row['brand']), _identity(row['model'])))
+            job = latest_job
             if job:
                 stage = 'research' if job.get('mode') == 'research' else 'card'
                 value.update(origin='queue', state=_job_state(job, stage), stage=stage, job_id=job['id'],

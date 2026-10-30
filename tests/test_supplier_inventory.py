@@ -90,6 +90,36 @@ def test_standalone_done_job_is_not_claimed_published_and_suffixes_do_not_merge(
     assert 'карточка готова и отправлена' in render(inventory(), states)
 
 
+@pytest.mark.parametrize('index,job_id,model', [
+    (1, 3871, 'PPG-5000D'), (7, 3877, 'PPG-11000 DVR'),
+])
+def test_newer_cohort_card_supersedes_canonical_publication_or_failure(dbs, index, job_id, model):
+    with sqlite3.connect(dbs[1]) as db:
+        db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)',
+                   (job_id, 'CARVER', model, 'done', 'kbt', None, 1))
+    states = lookup(*dbs, inventory()['rows'])
+    assert states[index]['state'] == 'ready'
+    assert states[index]['origin'] == 'queue' and states[index]['job_id'] == job_id
+    assert states[index]['result_sent'] is True
+    # The DR suffix remains a separate SKU even when DVR has a newer card.
+    assert states[6]['state'] == 'failed' and states[6]['job_id'] == 3855
+
+
+@pytest.mark.parametrize('status,expected', [('processing', 'processing'), ('done', 'research_done')])
+@pytest.mark.parametrize('linked', [False, True])
+def test_newest_research_does_not_reuse_old_card_or_publication(dbs, status, expected, linked):
+    with sqlite3.connect(dbs[1]) as db:
+        db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)',
+                   (4100, 'CARVER', 'PPG-5000D', status, 'research', None, 0))
+    if linked:
+        with sqlite3.connect(dbs[0]) as db:
+            db.execute("UPDATE excel_items SET research_job=4100,status='research',ts=12 "
+                       "WHERE key='excel|carver|ppg-5000d'")
+    state = lookup(*dbs, inventory()['rows'])[1]
+    assert state['state'] == expected and state['stage'] == 'research'
+    assert state['job_id'] == 4100 and state['origin'] == ('factory' if linked else 'queue')
+
+
 @pytest.mark.parametrize('field,value', [('stock', False), ('stock', -1), ('cost_price', '0'), ('row_index', -1)])
 def test_invalid_transcription_rejected_without_guessed_facts(field, value):
     inv = inventory();inv['rows'][0][field] = value
