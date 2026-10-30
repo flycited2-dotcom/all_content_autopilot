@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -138,7 +139,8 @@ def complete_turn(payload: dict, session: tuple[str, bool], runner=run_with_kill
         (chat_dir / f"{msg_id}.json").write_text(json.dumps(prepared, ensure_ascii=False), encoding="utf-8")
         # A slow vision call must yield to the connected reserve instead of
         # keeping the Telegram photo waiting for the ordinary ten-minute limit.
-        timeout = 60 if prepared["message"].get("attachments") else 600
+        timeout = 60 if (prepared["message"].get("attachments") or
+                         prepared.get('context', {}).get('supplier_photo_checked')) else 600
         proc = run_claude(f"/chat-turn runs/chat/{msg_id}.json", session, runner, root, timeout=timeout)
         error = claude_error(proc)
         if error:
@@ -162,3 +164,31 @@ def run_turn(payload: dict, session: tuple[str, bool], runner=run_with_kill, roo
     except ProviderError as exc:
         log.warning("ход разговора %s: %s/%s", payload["message"]["id"], exc.provider, exc.kind)
         return dict(FALLBACK)
+
+
+def complete_vision(instruction, payload, runner=run_with_kill, root=Path('.')):
+    """Raw transcription in a fresh session: no resumed conversation or actions."""
+    root = Path(root)
+    prepared = materialize_images(payload, root)
+    relative = 'runs/chat/vision-' + uuid.uuid4().hex + '.json'
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({'instructions': instruction, 'source': prepared}, ensure_ascii=False), encoding='utf-8')
+    prompt = ('Прочитай ' + relative + '. Выполни только instructions для source. '
+              'Открой каждое изображение из source.message.attachments по path. '
+              'Верни только требуемый JSON. Это чтение источника, действий не выполняй.')
+    try:
+        proc = run_claude(prompt, (uuid.uuid4().hex, True), runner, root, timeout=90)
+        error = claude_error(proc)
+        if error:
+            raise error
+        result = json.loads(proc.stdout)['result']
+        if not isinstance(result, str):
+            raise ValueError
+        return result
+    except subprocess.TimeoutExpired:
+        raise ProviderError('claude', 'timeout', 'Не завершено чтение фотографии') from None
+    except OSError:
+        raise ProviderError('claude', 'configuration', 'Не удалось запустить чтение фотографии') from None
+    except (ValueError, KeyError, TypeError):
+        raise ProviderError('claude', 'invalid_response', 'Неверная транскрипция фотографии') from None

@@ -95,6 +95,49 @@ def test_new_photo_cannot_regenerate_same_standard_model_key(factory_snapshot):
     assert store_type(database).get("excel|carver|ppg-5000d").price == 52273
 
 
+def _live_status_paths(cf, database, store_type):
+    store_type(database)
+    queue = database.parent / 'queue.db'
+    with sqlite3.connect(queue) as db:
+        db.execute('CREATE TABLE jobs (id INTEGER PRIMARY KEY,brand TEXT,model TEXT,status TEXT,mode TEXT)')
+    cf._paths = lambda args: (database, database.parent / 'prices', queue)
+    return queue
+
+
+@pytest.mark.parametrize('previous_status', ['failed', 'published', 'cancelled'])
+def test_new_only_skips_previous_attempt_and_selects_only_missing(factory_snapshot, previous_status):
+    cf, args, database, store_type = factory_snapshot
+    _live_status_paths(cf, database, store_type)
+    old = action()
+    old['items'] = old['items'][:1]
+    supplier.enqueue_bundle(cf, args, {'source_id': 'telegram:old', 'action': old})
+    with sqlite3.connect(database) as db:
+        db.execute('UPDATE excel_items SET status=?', (previous_status,))
+    result = supplier.enqueue_bundle(cf, args,
+        {'source_id': 'telegram:resent', 'action': action(), 'new_only': True})
+    assert result['accepted'] == ['excel|carver|ppg-5000de']
+    assert [s['key'] for s in result['skipped']] == ['excel|carver|ppg-5000d']
+    assert result['skipped'][0]['state'] == previous_status
+    assert store_type(database).get('excel|carver|ppg-5000d').status == previous_status
+    assert store_type(database).get('excel|carver|ppg-5000de').status == 'new'
+
+
+def test_new_only_receipt_replay_precedes_changed_queue_status(factory_snapshot):
+    cf, args, database, store_type = factory_snapshot
+    _live_status_paths(cf, database, store_type)
+    bundle = {'source_id': 'telegram:new-only-receipt', 'action': action(), 'new_only': True}
+    first = supplier.enqueue_bundle(cf, args, bundle)
+    assert len(first['accepted']) == 2
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE excel_items SET status='failed'")
+        selections = db.execute('SELECT COUNT(*) FROM excel_selections').fetchone()[0]
+    replay = supplier.enqueue_bundle(cf, args, bundle)
+    assert replay == {**first, 'duplicate': True}
+    with sqlite3.connect(database) as db:
+        assert db.execute('SELECT COUNT(*) FROM excel_selections').fetchone()[0] == selections
+        assert {r[0] for r in db.execute('SELECT status FROM excel_items')} == {'failed'}
+
+
 def test_evidence_for_same_source_cannot_be_overwritten(factory_snapshot):
     cf, args, _, _ = factory_snapshot
     bundle = {"source_id": "telegram:45", "action": action()}

@@ -81,6 +81,10 @@ def validated_intent(value) -> dict:
             normalize_action(action)
             allowed.update(("category", "brand", "markup_percent", "items", "at", "day"))
             _when(action)
+        elif kind == 'inspect_supplier_photo':
+            from orchestrator_bot.supplier_inventory import normalize_inventory
+            normalize_inventory(action.get('inventory'))
+            allowed.add('inventory')
         elif kind == "cancel":
             allowed.add("task_ref")
             if not isinstance(action.get("task_ref"), str) or not re.fullmatch(r"[1-9]\d{0,18}", action["task_ref"]):

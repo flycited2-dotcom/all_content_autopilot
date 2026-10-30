@@ -133,6 +133,17 @@ def enqueue_bundle(cf, args, bundle: dict) -> dict:
         result = json.loads(receipt_path.read_text(encoding="utf-8"))
         return {**result, "duplicate": True}
 
+    # A newly resent photograph is not permission to repeat a failed or ready
+    # paid task. Receipt replay above still restores the original accepted batch.
+    skipped = []
+    if bundle.get('new_only') is True:
+        from orchestrator_bot.supplier_inventory import lookup
+        status_rows = [dict(item, attachment_index=item.get('attachment_index', 0), row_index=n)
+                       for n, item in enumerate(items, 1)]
+        statuses = lookup(state_db, queue_db, status_rows)
+        skipped = [status for status in statuses if status['state'] != 'missing']
+        items = [item for item, status in zip(items, statuses) if status['state'] == 'missing']
+
     # The factory selection transaction and this evidence store are separate.
     # A process can die after selection but before its receipt is written. Such
     # an attempt must remain visible and must never blindly select failed tasks
@@ -152,7 +163,7 @@ def enqueue_bundle(cf, args, bundle: dict) -> dict:
     accepted = ExcelStore(state_db).select_items(rows, queue_db=queue_db) if rows else []
     keys = [row[0] for row in accepted]
     selected = set(keys)
-    result = {"requested": len(items), "accepted": keys,
+    result = {"requested": len(items), "accepted": keys, 'skipped': skipped,
               "items": [item for item in items if item["key"] in selected],
               "manifest_path": str(manifest_path)}
     _immutable(receipt_path, _json_bytes(result))

@@ -27,7 +27,7 @@ class Factory:
         self._publish_lock=threading.RLock()
 
     def _run(self, *args) -> dict:
-        catalog = args[0] in ('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'correct-photo', 'photo-review-scope', 'publish-audited', 'batch-status', 'publish-keys', 'cancel')
+        catalog = args[0] in ('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'supplier-photo-status', 'resume-photo', 'correct-photo', 'photo-review-scope', 'publish-audited', 'batch-status', 'publish-keys', 'cancel')
         module = 'orchestrator_bot.catalog_cli' if catalog else 'content_factory.agent_cli'
         cmd = [self.cf_python, "-m", module, *args]
         # content-factory не установлен пакетом: его юниты задают PYTHONPATH=<root>/src — делаем так же
@@ -78,13 +78,15 @@ class Factory:
         # карточки делаются сразу, партия публикуется в названное время (feed.publish_at).
         return self._run("enqueue", *self._select_args(action))
 
-    def enqueue_supplier(self, action: dict, source_id: str, attachments=()) -> dict:
+    def enqueue_supplier(self, action: dict, source_id: str, attachments=(), *, new_only=False) -> dict:
         # Images travel through a temporary file: Windows command lines cannot
         # safely carry large base64 payloads. Close it before the subprocess opens it.
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as fh:
             path = fh.name
-            json.dump({"action": action, "source_id": source_id, "attachments": list(attachments)},
-                      fh, ensure_ascii=False)
+            bundle = {"action": action, "source_id": source_id, "attachments": list(attachments)}
+            if new_only:
+                bundle['new_only'] = True
+            json.dump(bundle, fh, ensure_ascii=False)
         try:
             return self._run("enqueue-supplier", "--supplier-file", path)
         finally:
@@ -92,6 +94,15 @@ class Factory:
 
     def reconcile_photo(self, decision):
         return self._run('resume-photo', '--audit-json', json.dumps(decision, ensure_ascii=False))
+
+    def supplier_photo_status(self, inventory):
+        with tempfile.NamedTemporaryFile('w', encoding='utf-8', suffix='.json', delete=False) as fh:
+            path = fh.name
+            json.dump(inventory, fh, ensure_ascii=False)
+        try:
+            return self._run('supplier-photo-status', '--supplier-file', path)
+        finally:
+            os.unlink(path)
 
     def correct_photo(self, decision):
         return self._run('correct-photo', '--feedback-json', json.dumps(decision, ensure_ascii=False))

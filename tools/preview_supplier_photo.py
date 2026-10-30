@@ -27,6 +27,7 @@ def main(argv=None):
     parser.add_argument("photos", nargs="+", type=Path)
     parser.add_argument("--instruction", required=True, help="Owner's actual price/stock/markup instruction")
     parser.add_argument("--output", type=Path, default=ROOT / "runs/supplier-photo-preview")
+    parser.add_argument('--inventory-only', action='store_true')
     args = parser.parse_args(argv)
     from PIL import Image
     formats = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
@@ -41,6 +42,17 @@ def main(argv=None):
     provider = ChatGPTProvider(ChatGPTAuth(root=ROOT))
     if not provider.ready():
         raise ValueError("ChatGPT для проверки ещё не подключён")
+    if args.inventory_only:
+        from listener.supplier_vision import extract
+        from orchestrator_bot.supplier_inventory import render
+        inventory = extract(payload, lambda instruction, source: provider.complete(instruction, source, history=()))
+        args.output.mkdir(parents=True, exist_ok=True)
+        target = args.output / 'inventory.json'
+        target.write_text(json.dumps(inventory, ensure_ascii=False, indent=2), encoding='utf-8')
+        (args.output / 'inventory.txt').write_text(render(inventory, []), encoding='utf-8')
+        print(json.dumps({'read_only': True, 'complete': inventory['complete'], 'positions': len(inventory['rows']),
+                          'output': str(target.resolve()), 'warnings': inventory['warnings']}, ensure_ascii=False))
+        return 0
     intent = validated_intent(provider.complete(instructions(ROOT), payload))
     preview = []
     for action in intent["actions"]:

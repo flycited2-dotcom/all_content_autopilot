@@ -15,7 +15,7 @@ from orchestrator_bot.intents import Outcome, Result
 
 log = logging.getLogger("orchestrator_bot")
 EDITORIAL = ("run_editorial", "revise_editorial")
-CAPABILITIES = ["list_products", "product_selection", "full_catalog", "supplier_photo_import"]
+CAPABILITIES = ["list_products", "product_selection", "full_catalog", "supplier_photo_import", "supplier_photo_inventory"]
 
 
 def text_chunks(text: str, maximum=3800):
@@ -41,12 +41,17 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
     reply, acts = intents.normalize(intent)          # разбор до отметки: битое намерение не «сжигает» сообщение
     if not store.mark_intent(msg_id):
         response = store.get_response(msg_id)
-        # A supplier dispatch has its own durable receipt. After a process crash,
-        # recover that result and batch instead of silently consuming the photo.
-        if response is not None or not acts or any(a["type"] != "enqueue_supplier_products" for a in acts):
+        # Inspections are read-only; supplier dispatch has its own durable
+        # receipt. Recover both after a crash instead of consuming the photo.
+        replayable = {"enqueue_supplier_products", "inspect_supplier_photo"}
+        if any(a["type"] == "inspect_supplier_photo" for a in acts):
+            replayable.add("ask")
+        recoverable_photo = bool(acts) and all(a["type"] in replayable for a in acts)
+        if response is not None or not recoverable_photo:
             store.mark_done(msg_id)
             return {**(response or {"ok": True, "editorial": []}), "duplicate": True}
     results, editorial = [], []
+    inventory = next((a["inventory"] for a in acts if a["type"] == "inspect_supplier_photo"), None)
     for action in acts:
         try:
             outcomes = intents.plan([action], factory.resolve, threshold)
@@ -56,7 +61,8 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
             continue
         for outcome in outcomes:
             try:
-                results.append(actions.execute(outcome, factory, store, msg_id))
+                options = {"supplier_inventory": inventory} if inventory is not None else {}
+                results.append(actions.execute(outcome, factory, store, msg_id, **options))
                 if outcome.kind in EDITORIAL:
                     editorial.append(outcome.action)
             except Exception as exc:

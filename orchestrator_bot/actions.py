@@ -11,20 +11,34 @@ def _names(items, limit=10) -> str:
     return "".join(f"\n— {n}" for n in names) + more
 
 
-def execute(outcome: Outcome, factory, store, msg_id, *, source_suffix="") -> Result:
+def execute(outcome: Outcome, factory, store, msg_id, *, source_suffix="", supplier_inventory=None) -> Result:
     kind = outcome.kind
+    if kind == 'inspect_supplier_photo':
+        from orchestrator_bot.supplier_inventory import normalize_inventory, render
+        inventory = normalize_inventory(outcome.action['inventory'])
+        statuses = factory.supplier_photo_status(inventory).get('statuses', [])
+        return Result(outcome, render(inventory, statuses))
     if kind == "enqueue_supplier_products":
         import hashlib
         import json
         from orchestrator_bot.supplier_import import normalize_action, source_message, validate_source
         action = normalize_action(outcome.action)
+        if supplier_inventory is not None:
+            from orchestrator_bot.supplier_inventory import validate_selection
+            # Validate again at the durable executor, including after a restart.
+            if not supplier_inventory.get('complete'):
+                raise ValueError('Разбор фото не прошёл сверку: генерация остановлена')
+            validate_selection(action, supplier_inventory)
         message = source_message(store, msg_id)
         images = validate_source(action, message)
         digest = hashlib.sha256(json.dumps(action, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-        result = factory.enqueue_supplier(action, f"telegram:{msg_id}:{digest}{source_suffix}", images)
+        options = {'new_only': True} if supplier_inventory is not None else {}
+        result = factory.enqueue_supplier(action, f"telegram:{msg_id}:{digest}{source_suffix}", images, **options)
         accepted = result.get("accepted") or []
         if not accepted:
-            return Result(outcome, "ℹ️ Новых позиций из прайса нет: товары уже в работе либо отсутствуют в наличии.")
+            return Result(outcome, 'Новая генерация не запущена. Статус каждой позиции указан в разборе фото.'
+                          if supplier_inventory is not None else
+                          'Новая генерация не запущена: сервер не принял позиции. Это не подтверждает, что карточки уже готовы.')
         # Use the same batch/cancel/publication controls as catalog products.
         existing = store.find_supplier_selection(msg_id, action, result.get("manifest_path"))
         log_id = existing["id"] if existing else store.log_action(msg_id, "enqueue", action, result)

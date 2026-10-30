@@ -69,7 +69,7 @@ def enqueue(cf, args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'resume-photo', 'correct-photo', 'photo-review-scope', 'publish-audited', 'batch-status', 'publish-keys', 'cancel'))
+    parser.add_argument('command', choices=('hint', 'resolve', 'enqueue', 'enqueue-supplier', 'supplier-photo-status', 'resume-photo', 'correct-photo', 'photo-review-scope', 'publish-audited', 'batch-status', 'publish-keys', 'cancel'))
     parser.add_argument('--audit-json')
     parser.add_argument('--feedback-json')
     parser.add_argument('--job-id', type=int)
@@ -83,12 +83,17 @@ def main(argv=None):
     for flag in ('inverter', 'heat-pump', 'full-dc', 'no-wake'):
         parser.add_argument('--' + flag, action='store_true')
     args = parser.parse_args(argv)
-    if args.command not in ('hint', 'enqueue-supplier', 'resume-photo', 'correct-photo', 'photo-review-scope', 'publish-audited', 'batch-status', 'publish-keys', 'cancel') and not args.category:
+    if args.command not in ('hint', 'enqueue-supplier', 'supplier-photo-status', 'resume-photo', 'correct-photo', 'photo-review-scope', 'publish-audited', 'batch-status', 'publish-keys', 'cancel') and not args.category:
         parser.error('--category is required')
-    if args.command == 'enqueue-supplier' and not args.supplier_file:
+    if args.command in ('enqueue-supplier', 'supplier-photo-status') and not args.supplier_file:
         parser.error('--supplier-file is required')
     from content_factory import agent_cli as cf
-    if args.command == 'enqueue-supplier':
+    if args.command == 'supplier-photo-status':
+        from orchestrator_bot.supplier_inventory import lookup, normalize_inventory
+        inventory = normalize_inventory(json.loads(Path(args.supplier_file).read_text(encoding='utf-8')))
+        state, _, queue = cf._paths(args)
+        result = {'statuses': lookup(state, queue, inventory['rows'])}
+    elif args.command == 'enqueue-supplier':
         from orchestrator_bot.supplier_catalog import run
         result = run(cf, args)
     elif args.command in ('batch-status', 'publish-keys', 'cancel'):

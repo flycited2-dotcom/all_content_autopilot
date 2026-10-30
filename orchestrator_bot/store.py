@@ -257,6 +257,9 @@ class Store:
     # ── вопросы с кнопками ──
     def save_ask(self, msg_id, action: dict, options: list[str]) -> int:
         with self._c() as db:
+            for row in db.execute('SELECT id,action,options FROM asks WHERE msg_id=? ORDER BY id DESC', (msg_id,)):
+                if json.loads(row['action']) == action and json.loads(row['options']) == options:
+                    return row['id']
             return db.execute("INSERT INTO asks(msg_id, action, options) VALUES(?,?,?)",
                               (msg_id, json.dumps(action, ensure_ascii=False),
                                json.dumps(options, ensure_ascii=False))).lastrowid

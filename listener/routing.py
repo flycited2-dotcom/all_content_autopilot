@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from listener import brain
+from listener import brain, supplier_vision
 from listener.attachments import decode_images, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES
 from listener.intent_validation import validated_intent
 from listener.pending import write_json
@@ -39,7 +41,7 @@ def instructions(root: Path) -> str:
 
 
 class ModelRouter:
-    def __init__(self, root=Path("."), notify=None, claude=None, chatgpt=None, clock=time.time):
+    def __init__(self, root=Path("."), notify=None, claude=None, chatgpt=None, clock=time.time, vision_complete=None):
         self.root, self.notify, self.clock = Path(root), notify, clock
         self._lock = threading.RLock()
         self.path = self.root / "runs" / "chat" / "providers.json"
@@ -57,6 +59,69 @@ class ModelRouter:
             from listener.chatgpt_auth import ChatGPTAuth
             chatgpt = ChatGPTProvider(ChatGPTAuth(root=self.root), model=os.environ.get("ORCH_CHATGPT_MODEL"))
         self.chatgpt = chatgpt
+        self.vision_complete = vision_complete
+
+    def _vision_call(self, instruction, payload):
+        if self.vision_complete is not None:
+            return self.vision_complete(instruction, payload)
+        for name in ('claude', 'chatgpt'):
+            if self._blocked(name):
+                continue
+            try:
+                if name == 'claude':
+                    result = brain.complete_vision(instruction, payload, root=self.root)
+                else:
+                    if not self.chatgpt.ready():
+                        raise ProviderError(name, 'auth', 'ChatGPT ещё не подключён')
+                    result = self.chatgpt.complete(instruction, payload, history=())
+                supplier_vision.validate(result, len(decode_images(payload)))
+                return result
+            except (ProviderError, supplier_vision.IncompletePhoto) as error:
+                if not isinstance(error, ProviderError):
+                    error = ProviderError(name, 'invalid_response', 'Неполная транскрипция фотографии')
+                self._failure(name, error)
+        raise ProvidersUnavailable('Не завершена полная транскрипция; фото сохранено')
+
+    def _photo_inventory(self, payload):
+        """Cache only verified source facts; never cache statuses or a dialogue reply."""
+        images = decode_images(payload)
+        key = hashlib.sha256(('supplier-inventory-v1|' + '|'.join(i['sha256'] for i in images)).encode()).hexdigest()
+        path = self.path.parent / 'supplier-inventories' / (key + '.json')
+        try:
+            value = json.loads(path.read_text(encoding='utf-8'))
+            from orchestrator_bot.supplier_inventory import normalize_inventory
+            value = normalize_inventory(value)
+            if value.get('complete') is True and value.get('source_sha256') == [i['sha256'] for i in images]:
+                return value
+        except (OSError, ValueError, TypeError):
+            pass
+        value = supplier_vision.extract(payload, self._vision_call)
+        if value['complete'] and value['rows']:
+            write_json(path, value)
+        return value
+
+    @staticmethod
+    def _photo_task(payload):
+        message = payload['message']
+        if not message.get('attachments'):
+            return False
+        if message.get('attachment_context') != 'recent_photos':
+            return True
+        text = str(message.get('text', '')).casefold()
+        return bool(re.search(r'фото|снимк|прайс|изображени|на картин|эти(?:х|м)? товар', text))
+
+    @staticmethod
+    def _inventory_intent(intent, inventory):
+        """The source table is mandatory; a model cannot replace it with a history summary."""
+        from orchestrator_bot.supplier_inventory import validate_selection
+        actions = [{'type': 'inspect_supplier_photo', 'inventory': inventory}]
+        for action in intent['actions']:
+            if action['type'] == 'ask':
+                actions.append(action)
+            elif action['type'] == 'enqueue_supplier_products' and inventory['complete']:
+                validate_selection(action, inventory)
+                actions.append(action)
+        return validated_intent({'reply': '', 'actions': actions})
 
     def _save(self):
         with self._lock:
@@ -156,6 +221,20 @@ class ModelRouter:
                     self.state["last_message_id"] = payload["message"]["id"]
                     self._save()
                 return intent
+            if self._photo_task(payload):
+                inventory = self._photo_inventory(payload)
+                payload = copy.deepcopy(payload)
+                payload.setdefault('context', {})['supplier_photo_checked'] = True
+                if inventory['rows']:
+                    if 'supplier_photo_inventory' not in payload.get('context', {}).get('capabilities', []):
+                        return {'reply': 'Для полного разбора прайса требуется обновление сервера Оркестратора.', 'actions': []}
+                    payload = copy.deepcopy(payload)
+                    # The decision model receives the verified transcription;
+                    # only the isolated readers interpret pixels.
+                    payload['message'].pop('attachments', None)
+                    payload.setdefault('context', {})['supplier_inventory'] = inventory
+                    if not inventory['complete']:
+                        return {'reply': '', 'actions': [{'type': 'inspect_supplier_photo', 'inventory': inventory}]}
             return self._run_turn(payload, session)
 
     def _run_turn(self, payload, session):
@@ -173,6 +252,13 @@ class ModelRouter:
                     value = self.chatgpt.complete(instructions(self.root), enriched, history=())
                 try:
                     intent = validated_intent(value)
+                    inventory = payload.get('context', {}).get('supplier_inventory')
+                    if inventory:
+                        intent = self._inventory_intent(intent, inventory)
+                    elif payload.get('context', {}).get('supplier_photo_checked') and any(
+                            a['type'] in ('enqueue_products', 'enqueue_supplier_products') for a in intent['actions']):
+                        intent = {'reply': 'На фото не подтверждён полный прайс. Уточните, какие строки нужно разобрать.',
+                                  'actions': []}
                 except ValueError:
                     raise ProviderError(name, "invalid_response", "Неверный формат намерения") from None
             except ProviderError as error:
