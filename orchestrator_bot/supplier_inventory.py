@@ -277,18 +277,18 @@ def render(inventory, statuses=(), *, filter_brand=None, excluded_models=(), mar
     rows = inventory['rows']
     by_position = {(s['attachment_index'], s['row_index']): s for s in statuses}
     brands = Counter(row['brand'] or 'бренд не прочитан' for row in rows)
-    lines = [f"📷 На фото распознано позиций: {len(rows)} ({'; '.join(f'{k}: {v}' for k,v in brands.items())}).",
+    lines = [f"📋 В источнике распознано позиций: {len(rows)} ({'; '.join(f'{k}: {v}' for k,v in brands.items())}).",
              f"Положительный остаток: {sum(row['stock'] is not None and row['stock'] > 0 for row in rows)}; "
              f"нулевой: {sum(row['stock'] == 0 for row in rows)}; "
              f"не указан/не читается: {sum(row['stock'] is None for row in rows)}."]
     if not inventory['complete']:
-        lines.append('⚠️ Два чтения фото не совпали. Полнота разбора не подтверждена; перед запуском нужны уточнения.')
+        lines.append('⚠️ Два чтения источника не совпали. Полнота разбора не подтверждена; перед запуском нужны уточнения.')
     if filter_brand:
         filter_brand = _text(filter_brand, 'бренд отбора', 100)
         lines.append('Отбор для запуска: ' + filter_brand + '. Остальные строки также показаны.')
     if markup_percent is not None:
         markup = _decimal(markup_percent, 'наценка', Decimal(0), Decimal(1000))
-        lines.append('Наценка для задания: ' + _number(markup) + '%. Ниже — входящие цены с фото.')
+        lines.append('Наценка для задания: ' + _number(markup) + '%. Ниже — входящие цены из источника.')
     excluded = {_identity(model) for model in excluded_models}
     for n, row in enumerate(rows, 1):
         price = _number(row['cost_price']) + ' ₽' if row['cost_price'] is not None else 'не читается'
@@ -313,7 +313,7 @@ def render(inventory, statuses=(), *, filter_brand=None, excluded_models=(), mar
         if row['stock'] is None:
             annotations.append('не ставить в генерацию до уточнения остатка')
         elif row['stock'] == 0:
-            annotations.append('на фото указан нулевой остаток')
+            annotations.append('в источнике указан нулевой остаток')
         lines.append('Состояние: ' + status + ('. ' + '; '.join(annotations) if annotations else '') + '.')
     if inventory['warnings']:
         lines += ['', 'Требует внимания: ' + '; '.join(inventory['warnings'])]

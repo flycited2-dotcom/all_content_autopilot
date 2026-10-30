@@ -39,7 +39,8 @@ DRAFT_FIELDS = ("image_job", "image_path", "status", "control_message_id", "resu
                 "publish_at")
 _MIGRATIONS = ("ALTER TABLE drafts ADD COLUMN final_text TEXT", "ALTER TABLE drafts ADD COLUMN publish_at REAL",
                "ALTER TABLE messages ADD COLUMN attachments TEXT",
-               "ALTER TABLE messages ADD COLUMN media_group_id TEXT")
+               "ALTER TABLE messages ADD COLUMN media_group_id TEXT",
+               "ALTER TABLE messages ADD COLUMN document TEXT")
 
 
 class Store:
@@ -60,12 +61,13 @@ class Store:
         return _Closing(db)
 
     # ── очередь ──
-    def add_message(self, tg_message_id, kind, text, now=None, attachments=None) -> int | None:
+    def add_message(self, tg_message_id, kind, text, now=None, attachments=None, document=None) -> int | None:
         """None — это сообщение Telegram уже в очереди (повторная доставка после перезапуска)."""
         with self._c() as db:
-            cur = db.execute("INSERT OR IGNORE INTO messages(tg_message_id, kind, text, created, attachments) VALUES(?,?,?,?,?)",
+            cur = db.execute("INSERT OR IGNORE INTO messages(tg_message_id, kind, text, created, attachments, document) VALUES(?,?,?,?,?,?)",
                              (tg_message_id, kind, text, now or time.time(),
-                              json.dumps(attachments, ensure_ascii=False) if attachments else None))
+                              json.dumps(attachments, ensure_ascii=False) if attachments else None,
+                              json.dumps(document, ensure_ascii=False) if document else None))
             return cur.lastrowid if cur.rowcount == 1 else None
 
     def has_tg_message(self, tg_message_id) -> bool:
@@ -128,7 +130,54 @@ class Store:
             message["attachments"] = json.loads(row["attachments"])
         if row["media_group_id"]:
             message["media_group_id"] = row["media_group_id"]
+        if row["document"]:
+            message["document"] = json.loads(row["document"])
         return message
+
+    def recent_document(self, before_id, max_age=1800):
+        current = self.get_message(before_id)
+        if current is None:
+            return None
+        with self._c() as db:
+            row = db.execute("SELECT id,document,attachments FROM messages WHERE id < ? "
+                             "AND document IS NOT NULL AND created >= ? AND created <= ? ORDER BY id DESC LIMIT 1",
+                             (before_id, current['created'] - max_age, current['created'])).fetchone()
+        if not row:
+            return None
+        return {'document': dict(json.loads(row['document']), source_message_id=row['id']),
+                'attachments': json.loads(row['attachments']) if row['attachments'] else []}
+
+    def recent_pending_document(self, before_id, *, ask_id=None, max_age=1800):
+        """Bind a short answer to an actual source-specific pending question.
+
+        Freeform answers apply only immediately after the question's message.
+        An exact callback marker may select its now-used ask, but neither path
+        may jump over a newer supplied document or photograph.
+        """
+        current = self.get_message(before_id)
+        if current is None:
+            return None
+        with self._c() as db:
+            args = [before_id, current['created'] - max_age, current['created']]
+            where = 'a.id=?' if ask_id is not None else 'a.used=0'
+            if ask_id is not None:
+                args.append(ask_id)
+            row = db.execute("SELECT a.id AS ask_id,m.id,m.document,m.attachments FROM asks a "
+                             "JOIN messages m ON m.id=a.msg_id WHERE m.id < ? AND m.created >= ? "
+                             "AND m.created <= ? AND " + where + " ORDER BY a.id DESC LIMIT 1", args).fetchone()
+            if not row or not row['document']:
+                return None
+            if ask_id is None:
+                intervening = db.execute("SELECT 1 FROM messages WHERE id > ? AND id < ? LIMIT 1",
+                                         (row['id'], before_id)).fetchone()
+            else:
+                intervening = db.execute("SELECT 1 FROM messages WHERE id > ? AND id < ? "
+                                         "AND (document IS NOT NULL OR kind='photo') LIMIT 1",
+                                         (row['id'], before_id)).fetchone()
+            if intervening:
+                return None
+        return {'document': dict(json.loads(row['document']), source_message_id=row['id']),
+                'attachments': json.loads(row['attachments']) if row['attachments'] else []}
 
     def recent_photo_attachments(self, before_id, limit=3, max_age=1800) -> list[dict]:
         """Recent photos can precede an instruction; never use later or stale images."""
@@ -206,6 +255,8 @@ class Store:
             message["attachments"] = json.loads(row["attachments"])
         if row["media_group_id"]:
             message["media_group_id"] = row["media_group_id"]
+        if row["document"]:
+            message["document"] = json.loads(row["document"])
         return message
 
     def mark_done(self, msg_id):
@@ -256,6 +307,17 @@ class Store:
 
     # ── вопросы с кнопками ──
     def save_ask(self, msg_id, action: dict, options: list[str]) -> int:
+        current = self.get_message(msg_id)
+        if current is not None and not current.get('document'):
+            from orchestrator_bot.supplier_import import source_message
+            inherited = source_message(self, msg_id)
+            if inherited.get('document'):
+                # Anchor another clarification to the same source, even after
+                # this intermediate short answer is completed and restarted.
+                with self._c() as db:
+                    db.execute('UPDATE messages SET document=?,attachments=? WHERE id=? AND document IS NULL',
+                        (json.dumps(inherited['document'], ensure_ascii=False),
+                         json.dumps(inherited.get('attachments') or [], ensure_ascii=False), msg_id))
         with self._c() as db:
             for row in db.execute('SELECT id,action,options FROM asks WHERE msg_id=? ORDER BY id DESC', (msg_id,)):
                 if json.loads(row['action']) == action and json.loads(row['options']) == options:

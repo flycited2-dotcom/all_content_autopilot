@@ -8,3 +8,4 @@
 - [Обзор архитектуры и предложения по развитию](docs/reports/2026-10-22-codex-project-review.md)
 - [Контроль фотографий — @foto_auditor_bot: токен, запуск и подключение](docs/photo-auditor.md)
 - [Прайсы поставщиков по фото: распознавание, остатки и наценка](docs/supplier-photo-import.md)
+- [Текст и документы поставщиков: PDF, Word, Excel и другие форматы](docs/supplier-documents.md)

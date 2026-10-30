@@ -184,7 +184,19 @@ def _queue(deps, chat_id, tg_message_id, kind, text, *, raw_text=None, reply_mes
         text = _take_note(deps, chat_id, text)
         if text is None:
             return
-    if deps.store.add_message(tg_message_id, kind, text, now=deps.clock()) is None:
+    document = None
+    from orchestrator_bot.document_context import pasted_table
+    if pasted_table(text):
+        from orchestrator_bot.document_import import extract
+        from orchestrator_bot.document_transport import save_original
+        try:
+            data = text.encode('utf-8')
+            document = save_original(deps.store.path.parent, data, 'Вставленный текст.txt',
+                                     extract(data, 'Вставленный текст.txt'))
+        except ValueError as exc:
+            deps.tg.send(chat_id, str(exc))
+            return
+    if deps.store.add_message(tg_message_id, kind, text, now=deps.clock(), **({'document': document} if document else {})) is None:
         return                                       # повторная доставка — уже в очереди
     hb = deps.store.last_heartbeat()
     if hb is None or deps.clock() - hb > deps.heartbeat_stale_after:
@@ -260,6 +272,37 @@ def _photo(deps, chat_id, message):
     notice = (OFFLINE_NOTICE if hb is None or deps.clock() - hb > deps.heartbeat_stale_after
               else "📷 Фотография принята, разбираю модели, цены и остатки.")
     deps.tg.send(chat_id, notice)
+
+
+def _document(deps, chat_id, message):
+    from orchestrator_bot import document_import
+    from orchestrator_bot.document_transport import save_original
+    source = message['document']
+    filename = str(source.get('file_name') or '')
+    try:
+        if int(source.get('file_size') or 0) > document_import.MAX_FILE_BYTES:
+            raise ValueError('Файл больше 20 МБ. Разделите его на части')
+        # Reject unknown formats before spending time downloading them.
+        from pathlib import PurePath
+        if PurePath(filename).suffix.lower() not in document_import.SUPPORTED_EXTENSIONS:
+            raise ValueError('Поддерживаются PDF, DOCX, DOC, TXT, CSV, TSV, YAML, JSON, XLSX, XLS, XLSM, ODS и RTF')
+        data = deps.tg.download_file(source['file_id'], max_bytes=document_import.MAX_FILE_BYTES)
+        parsed = document_import.extract(data, filename)
+        document = save_original(deps.store.path.parent, data, filename, parsed)
+        created = deps.store.add_message(message['message_id'], 'document',
+            _with_reply_context(message, (message.get('caption') or '').strip() or 'Разбери приложенный документ'),
+            now=deps.clock(), attachments=parsed.get('images'), document=document)
+    except ValueError as exc:
+        deps.tg.send(chat_id, f'📄 {exc}.')
+        return
+    except Exception as exc:
+        log.warning('Не удалось принять документ: %s', type(exc).__name__)
+        deps.tg.send(chat_id, '📄 Не удалось обработать файл. Попробуйте прислать его ещё раз.')
+        return
+    if created is not None:
+        hb = deps.store.last_heartbeat()
+        deps.tg.send(chat_id, OFFLINE_NOTICE if hb is None or deps.clock() - hb > deps.heartbeat_stale_after
+                     else '📄 Файл принят, разбираю содержимое. Непонятные цены и остатки попрошу уточнить.')
 
 
 def _callback(deps, cq):
@@ -362,7 +405,8 @@ def _callback(deps, cq):
         action = ask["action"]
         if action.get("type") != "enqueue_products":
             # вариант из вопроса Claude — отдаём ответ обратно в разговор
-            _queue(deps, chat_id, None, "text", f"Ответ на вопрос «{action.get('question', '')}»: {option}")
+            _queue(deps, chat_id, None, "text", f"Ответ на вопрос «{action.get('question', '')}»: {option}"
+                   f"\n[ответ на вопрос id: {ask['id']}]")
             return
         if option == "Отмена":
             text = "Хорошо, не ставлю."
@@ -399,7 +443,12 @@ def handle_update(update: dict, deps: Deps) -> None:
     if message.get("voice"):
         _voice(deps, chat_id, message)
         return
-    if message.get("photo") or message.get("document"):
+    document = message.get('document') or {}
+    if document and not (str(document.get('mime_type', '')).startswith('image/') or
+                          re.search(r'\.(?:jpe?g|png|webp)$', str(document.get('file_name', '')), re.I)):
+        _document(deps, chat_id, message)
+        return
+    if message.get("photo") or document:
         _photo(deps, chat_id, message)
         return
     text = (message.get("text") or "").strip()

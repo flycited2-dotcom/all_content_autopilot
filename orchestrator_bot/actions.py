@@ -33,7 +33,14 @@ def execute(outcome: Outcome, factory, store, msg_id, *, source_suffix="", suppl
         images = validate_source(action, message)
         digest = hashlib.sha256(json.dumps(action, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         options = {'new_only': True} if supplier_inventory is not None else {}
-        result = factory.enqueue_supplier(action, f"telegram:{msg_id}:{digest}{source_suffix}", images, **options)
+        dispatch_action = action
+        if not images:
+            dispatch_action = {**action, 'items': [{k: v for k, v in item.items() if k != 'attachment_index'}
+                                                  for item in action['items']]}
+        if message.get('document'):
+            from orchestrator_bot.document_transport import original_bundle
+            options['document'] = original_bundle(store.path.parent, message['document'])
+        result = factory.enqueue_supplier(dispatch_action, f"telegram:{msg_id}:{digest}{source_suffix}", images, **options)
         accepted = result.get("accepted") or []
         if not accepted:
             return Result(outcome, 'Новая генерация не запущена. Статус каждой позиции указан в разборе фото.'

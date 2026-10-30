@@ -84,7 +84,7 @@ def test_photo_offline_is_saved_before_offline_notice(deps):
 @pytest.mark.parametrize("fields,data,expected", [
     ({"photo": [{"file_id": "photo", "file_size": IMAGE_MAX_BYTES + 1}]}, PNG, "10 МБ"),
     ({"photo": [{"file_id": "photo"}]}, b"this is not an image", "JPEG"),
-    ({"document": {"file_id": "doc", "file_name": "price.pdf"}}, PNG, "JPEG"),
+    ({"document": {"file_id": "doc", "file_name": "price.pdf"}}, PNG, "повреждён"),
 ])
 def test_invalid_images_get_explanation_and_never_enter_queue(deps, fields, data, expected):
     deps.tg.data = data

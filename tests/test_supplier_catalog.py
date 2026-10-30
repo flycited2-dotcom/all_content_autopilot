@@ -84,6 +84,33 @@ def test_supplier_retry_returns_receipt_without_second_selection(factory_snapsho
         assert connection.execute("SELECT COUNT(*) FROM excel_selections").fetchone()[0] == 1
 
 
+def test_document_original_is_preserved_in_real_supplier_manifest(factory_snapshot):
+    import hashlib
+    cf, args, database, store_type = factory_snapshot
+    raw = b'brand,model,price,stock\nCARVER,PPG-5000D,45455,149'
+    document = {'filename': '../../price.csv', 'extension': '.csv',
+                'sha256': hashlib.sha256(raw).hexdigest(), 'text': raw.decode(), 'metadata': {},
+                'data': base64.b64encode(raw).decode()}
+    bundle = {'source_id': 'telegram:document:42', 'action': action(), 'document': document}
+    first = supplier.enqueue_bundle(cf, args, bundle)
+    replay = supplier.enqueue_bundle(cf, args, bundle)
+    assert replay['duplicate'] and replay['accepted'] == first['accepted']
+    path = Path(first['manifest_path'])
+    manifest = json.loads(path.read_text(encoding='utf-8'))
+    assert 'data' not in manifest['document']
+    assert (path.parent / manifest['document']['path']).read_bytes() == raw
+    assert manifest['document']['path'] == 'source-document.csv'
+    assert store_type(database).get('excel|carver|ppg-5000d').price == 52273
+
+
+def test_corrupt_document_source_cannot_select_any_products(factory_snapshot):
+    cf, args, database, store_type = factory_snapshot
+    with pytest.raises(ValueError, match='хеш'):
+        supplier.enqueue_bundle(cf, args, {'source_id': 'telegram:bad-document', 'action': action(),
+            'document': {'extension': '.txt', 'sha256': '0' * 64, 'data': base64.b64encode(b'changed').decode()}})
+    assert store_type(database).get('excel|carver|ppg-5000d') is None
+
+
 def test_new_photo_cannot_regenerate_same_standard_model_key(factory_snapshot):
     cf, args, database, store_type = factory_snapshot
     first = supplier.enqueue_bundle(cf, args, {"source_id": "telegram:43", "action": action()})

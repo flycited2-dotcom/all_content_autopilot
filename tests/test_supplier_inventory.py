@@ -68,7 +68,7 @@ def test_unknown_stock_is_distinct_from_zero_and_is_not_removed(dbs):
     assert clean['rows'][0]['stock'] == 0 and clean['rows'][4]['stock'] is None
     text = render(inv, lookup(*dbs, inv['rows']))
     assert 'нулевой: 1' in text and 'не указан/не читается: 2' in text
-    assert 'LIFAN' in text and 'на фото указан нулевой остаток' in text
+    assert 'LIFAN' in text and 'в источнике указан нулевой остаток' in text
 
 
 def test_lookup_is_readonly_and_never_creates_missing_database(dbs, tmp_path):

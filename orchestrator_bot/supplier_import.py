@@ -116,7 +116,34 @@ def source_message(store, msg_id):
     message = store.get_message(msg_id)
     if message is None:
         raise ValueError("Не найдено исходное сообщение поставщика")
-    if not message.get("attachments"):
+    from orchestrator_bot.document_context import (explicit_reference, pasted_table, pending_ask_id,
+                                                    pending_response, percentage_response)
+    if message.get('kind') in ('text', 'voice', 'callback') and pasted_table(message.get('text', '')):
+        # This message contains its own supplier source. Attaching an older
+        # document or photographs could silently replace or merge fresh facts.
+        return message
+    if not message.get('document') and message.get('kind') in ('text', 'voice', 'callback'):
+        ask_id = pending_ask_id(message.get('text', ''))
+        if ask_id is not None or pending_response(message.get('text', '')):
+            pending = store.recent_pending_document(msg_id, ask_id=ask_id)
+            if pending:
+                return {**message, **pending, 'document_context': 'pending_document'}
+            if ask_id is not None:
+                ask = store.get_ask(ask_id)
+                origin = store.get_message(ask['msg_id']) if ask else None
+                if origin and origin.get('document'):
+                    return {**message, 'document_source_error':
+                            'Этот вопрос относится к другому или устаревшему документу. '
+                            'Укажите нужный файл и наценку заново.'}
+            elif percentage_response(message.get('text', '')):
+                return {**message, 'document_source_error':
+                        'Уточните, к какому файлу или списку относится эта наценка. '
+                        'Например: «Из последнего файла в генерацию с наценкой 15%».'}
+        if explicit_reference(message.get('text', '')):
+            recent_document = store.recent_document(msg_id)
+            if recent_document:
+                return {**message, **recent_document, 'document_context': 'recent_document'}
+    if not message.get("attachments") and not message.get('document'):
         recent = store.recent_photo_attachments(msg_id, limit=8)
         if recent:
             message = {**message, "attachments": recent, "attachment_context": "recent_photos"}
@@ -134,8 +161,9 @@ def validate_source(action, message):
         index = row.get("attachment_index")
         if images and (type(index) is not int or not 0 <= index < len(images)):
             raise ValueError("Позиция не привязана к исходной фотографии")
-        if not images and index is not None:
+        if not images and index is not None and not (index == 0 and
+                (message.get('document') or message.get('kind') in ('text', 'voice', 'callback'))):
             raise ValueError("Исходная фотография отсутствует")
-    if not images and message.get("kind") not in ("text", "voice", "callback"):
+    if not images and not message.get('document') and message.get("kind") not in ("text", "voice", "callback"):
         raise ValueError("Нет исходных данных поставщика")
     return images

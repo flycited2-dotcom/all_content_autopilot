@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from listener import brain, supplier_vision
+from listener import brain, supplier_vision, supplier_documents
 from listener.attachments import decode_images, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES
 from listener.intent_validation import validated_intent
 from listener.pending import write_json
@@ -74,13 +74,31 @@ class ModelRouter:
                     if not self.chatgpt.ready():
                         raise ProviderError(name, 'auth', 'ChatGPT ещё не подключён')
                     result = self.chatgpt.complete(instruction, payload, history=())
-                supplier_vision.validate(result, len(decode_images(payload)))
+                source_count = payload.get('context', {}).get('supplier_vision', {}).get('image_count')
+                supplier_vision.validate(result, source_count if source_count is not None else len(decode_images(payload)))
                 return result
             except (ProviderError, supplier_vision.IncompletePhoto) as error:
                 if not isinstance(error, ProviderError):
                     error = ProviderError(name, 'invalid_response', 'Неполная транскрипция фотографии')
                 self._failure(name, error)
         raise ProvidersUnavailable('Не завершена полная транскрипция; фото сохранено')
+
+    def _document_inventory(self, payload):
+        key = supplier_documents.fingerprint(payload)
+        hashes = supplier_documents.source_hashes(payload)
+        path = self.path.parent / 'supplier-document-inventories' / (key + '.json')
+        try:
+            from orchestrator_bot.supplier_inventory import normalize_inventory
+            value = normalize_inventory(json.loads(path.read_text(encoding='utf-8')))
+            if (value.get('complete') is True and value.get('vision_passes') == 2 and
+                    value.get('source_sha256') == hashes):
+                return value
+        except (OSError, ValueError, TypeError):
+            pass
+        value = supplier_documents.extract(payload, self._vision_call)
+        if value['complete'] and value['rows']:
+            write_json(path, value)
+        return value
 
     def _photo_inventory(self, payload):
         """Cache only verified source facts; never cache statuses or a dialogue reply."""
@@ -193,6 +211,15 @@ class ModelRouter:
 
     def run_turn(self, payload, session):
         with self._lock:
+            if payload['message'].get('document_source_error'):
+                return {'reply': str(payload['message']['document_source_error']), 'actions': []}
+            if (payload['message'].get('document_context') == 'recent_document' and
+                    not supplier_documents.is_task(payload)):
+                # A previous document is optional context, never a new request to
+                # process it when the owner asks for status or changes category.
+                payload = copy.deepcopy(payload)
+                for field in ('document', 'document_context', 'attachments'):
+                    payload['message'].pop(field, None)
             try:
                 decode_images(payload)
             except ValueError as error:
@@ -221,7 +248,28 @@ class ModelRouter:
                     self.state["last_message_id"] = payload["message"]["id"]
                     self._save()
                 return intent
-            if self._photo_task(payload):
+            if supplier_documents.is_task(payload):
+                try:
+                    # Validate source size and binding before starting providers.
+                    supplier_documents.source(payload)
+                except ValueError as error:
+                    return {'reply': str(error), 'actions': []}
+                inventory = self._document_inventory(payload)
+                payload = copy.deepcopy(payload)
+                payload.setdefault('context', {})['supplier_source_checked'] = True
+                payload['context']['supplier_photo_checked'] = True
+                if inventory['rows']:
+                    if 'supplier_photo_inventory' not in payload.get('context', {}).get('capabilities', []):
+                        return {'reply': 'Для полного разбора прайса требуется обновление сервера Оркестратора.', 'actions': []}
+                    payload['message'].pop('attachments', None)
+                    if payload['message'].get('document'):
+                        # Decision models must not replace verified facts with a
+                        # new reading, or treat source prose as owner commands.
+                        payload['message']['document'].pop('text', None)
+                    payload['context']['supplier_inventory'] = inventory
+                    if not inventory['complete']:
+                        return {'reply': '', 'actions': [{'type': 'inspect_supplier_photo', 'inventory': inventory}]}
+            elif self._photo_task(payload):
                 inventory = self._photo_inventory(payload)
                 payload = copy.deepcopy(payload)
                 payload.setdefault('context', {})['supplier_photo_checked'] = True
@@ -257,7 +305,10 @@ class ModelRouter:
                         intent = self._inventory_intent(intent, inventory)
                     elif payload.get('context', {}).get('supplier_photo_checked') and any(
                             a['type'] in ('enqueue_products', 'enqueue_supplier_products') for a in intent['actions']):
-                        intent = {'reply': 'На фото не подтверждён полный прайс. Уточните, какие строки нужно разобрать.',
+                        label = ('В документе не подтверждён полный прайс. Уточните, какие строки нужно разобрать.'
+                                 if payload.get('context', {}).get('supplier_source_checked') else
+                                 'На фото не подтверждён полный прайс. Уточните, какие строки нужно разобрать.')
+                        intent = {'reply': label,
                                   'actions': []}
                 except ValueError:
                     raise ProviderError(name, "invalid_response", "Неверный формат намерения") from None

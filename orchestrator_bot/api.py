@@ -15,7 +15,7 @@ from orchestrator_bot.intents import Outcome, Result
 
 log = logging.getLogger("orchestrator_bot")
 EDITORIAL = ("run_editorial", "revise_editorial")
-CAPABILITIES = ["list_products", "product_selection", "full_catalog", "supplier_photo_import", "supplier_photo_inventory"]
+CAPABILITIES = ["list_products", "product_selection", "full_catalog", "supplier_photo_import", "supplier_photo_inventory", "document_import"]
 
 
 def text_chunks(text: str, maximum=3800):

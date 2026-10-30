@@ -123,6 +123,23 @@ def enqueue_bundle(cf, args, bundle: dict) -> dict:
     folder.mkdir(parents=True, exist_ok=True)
     manifest = {"version": 1, "source_id": source_id, "action": action, "items": items,
                 "attachments": [meta for meta, _ in images]}
+    if bundle.get('document') is not None:
+        document = dict(bundle['document'])
+        encoded = document.pop('data', None)
+        suffix = document.get('extension')
+        # Fixed evidence names, strict allowed suffix, hash checked independently.
+        from orchestrator_bot.document_import import SUPPORTED_EXTENSIONS, MAX_FILE_BYTES
+        if suffix not in SUPPORTED_EXTENSIONS or not isinstance(encoded, str) or len(encoded) > 4 * ((MAX_FILE_BYTES + 2) // 3):
+            raise ValueError('Неверный исходный документ поставщика')
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError('Повреждён исходный документ поставщика') from None
+        if not data or len(data) > MAX_FILE_BYTES or hashlib.sha256(data).hexdigest() != document.get('sha256'):
+            raise ValueError('Не совпадает хеш исходного документа поставщика')
+        document['path'] = 'source-document' + suffix
+        _immutable(folder / document['path'], data)
+        manifest['document'] = document
     manifest_path = folder / "manifest.json"
     for meta, data in images:
         _immutable(folder / meta["path"], data)
