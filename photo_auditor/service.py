@@ -23,9 +23,17 @@ ADVISORY_LABELS = {"approved": LABELS["approved"], "regenerate": "💡 Ауди�
                    "review": "💡 Замечания аудитора — фото не задержано"}
 
 
-def public_result(audit):
+def public_result(audit, root=None):
     report = audit["report"]
-    return {"id": audit["id"], "status": audit["status"], "sha256": audit["sha256"],
+    status = audit['status']
+    if root is not None and status == 'queued' and audit.get('retry_at', 0) > time.time():
+        from photo_auditor.mode import advisory
+        if advisory(root):
+            # An explicitly deferred read-only check continues in the background.
+            # Existing advisory clients pass on this same file, without approval
+            # or another render; gate clients retain the queued contract.
+            status = 'deferred'
+    return {"id": audit["id"], "status": status, "sha256": audit["sha256"],
             "product": audit["product"], "report": report, "feedback": feedback(report) if report else None,
             "provider_error": audit.get("provider_error"), "retry_at": audit.get("retry_at", 0)}
 
@@ -95,7 +103,7 @@ def make_server(store, token, port=8793):
                 row = store.get(self.path.removeprefix("/audits/"))
                 if row:
                     store.consumer_waiting(row['id'])
-                return self.send_json(200 if row else 404, public_result(row) if row else {"error": "not found"})
+                return self.send_json(200 if row else 404, public_result(row, store.root.parent.parent) if row else {"error": "not found"})
             self.send_json(404, {"error": "not found"})
 
         def do_POST(self):
@@ -121,7 +129,7 @@ def make_server(store, token, port=8793):
                         audit = store.get(audit['id'])
             except (ValueError, TypeError, KeyError):
                 return self.send_json(400, {"error": "Invalid product, revision or image; snapshot conflict"})
-            self.send_json(200, public_result(audit))
+            self.send_json(200, public_result(audit, store.root.parent.parent))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.audit_workers = []
     return server

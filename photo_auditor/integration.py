@@ -133,6 +133,10 @@ async def checked_output(root, product_id, brand, model, generated_path, supplie
             response = await http.post(url + "/audits", json=body, headers=headers)
             response.raise_for_status()
             result = response.json()
+            if advisory and result['status'] == 'deferred':
+                if result['sha256'] != fingerprint or result['product'] != product:
+                    raise AuditHold('Отложенная проверка относится к другому снимку/товару')
+                return hold_or_release('Проверка отложена и продолжится в фоне; этот файл передан в превью без автоматического одобрения')
             while result["status"] in ("queued", "checking", "waiting_provider"):
                 if advisory and result["status"] == "waiting_provider":
                     # The audit resumes by itself; its report reaches the owner's bot later.
@@ -145,6 +149,10 @@ async def checked_output(root, product_id, brand, model, generated_path, supplie
                 response = await http.get(url + "/audits/" + result["id"], headers=headers)
                 response.raise_for_status()
                 result = response.json()
+                if advisory and result['status'] == 'deferred':
+                    if result['sha256'] != fingerprint or result['product'] != product:
+                        raise AuditHold('Отложенная проверка относится к другому снимку/товару')
+                    return hold_or_release('Проверка отложена и продолжится в фоне; этот файл передан в превью без автоматического одобрения')
             if result["sha256"] != fingerprint or result["product"] != product or digest(path.read_bytes()) != fingerprint:
                 raise AuditHold("Результат проверки относится к другому снимку/товару")
             if result["status"] == "approved":
