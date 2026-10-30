@@ -38,6 +38,7 @@ class Result:
     ask_id: int | None = None
     buttons: list[dict] = field(default_factory=list)
     selection_rows: list[list[dict]] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
 
 
 def parse_intent(raw: str) -> dict:

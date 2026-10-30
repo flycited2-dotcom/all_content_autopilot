@@ -11,13 +11,15 @@ def _names(items, limit=10) -> str:
     return "".join(f"\n— {n}" for n in names) + more
 
 
-def execute(outcome: Outcome, factory, store, msg_id, *, source_suffix="", supplier_inventory=None) -> Result:
+def execute(outcome: Outcome, factory, store, msg_id, *, source_suffix="", supplier_inventory=None, supplier_pricing=None) -> Result:
     kind = outcome.kind
     if kind == 'inspect_supplier_photo':
         from orchestrator_bot.supplier_inventory import normalize_inventory, render
         inventory = normalize_inventory(outcome.action['inventory'])
         statuses = factory.supplier_photo_status(inventory).get('statuses', [])
-        return Result(outcome, render(inventory, statuses))
+        from orchestrator_bot.existing_cards import notice, pricing
+        report = notice(inventory, statuses, supplier_pricing or pricing(store.get_message(msg_id)))
+        return Result(outcome, render(inventory, statuses), notices=[report] if report else [])
     if kind == "enqueue_supplier_products":
         import hashlib
         import json

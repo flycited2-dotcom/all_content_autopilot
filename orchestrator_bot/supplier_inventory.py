@@ -2,6 +2,7 @@
 from collections import Counter
 from contextlib import closing
 from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 
@@ -82,6 +83,11 @@ def key_for(row):
     return 'excel|' + _identity(row['brand']) + '|' + _identity(row['model'])
 
 
+def _model_identity(value):
+    """Whitespace may separate a SKU suffix, but suffix characters never vanish."""
+    return ''.join(_identity(value).split())
+
+
 def validate_selection(action, inventory):
     """Bind every dispatch fact back to a verified photographed source row.
 
@@ -147,7 +153,7 @@ def _queue_rows(path, linked_ids, identities):
                 for row in db.execute('SELECT id,brand,model FROM jobs ORDER BY id DESC'):
                     if not isinstance(row['brand'], str) or not isinstance(row['model'], str):
                         continue
-                    identity = (_identity(row['brand']), _identity(row['model']))
+                    identity = (_identity(row['brand']), _model_identity(row['model']))
                     if identity in unmatched:
                         selected.add(row['id'])
                         unmatched.remove(identity)
@@ -156,7 +162,8 @@ def _queue_rows(path, linked_ids, identities):
             rows = []
             ids = list(selected)
             available = {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}
-            columns = [name for name in ('id', 'brand', 'model', 'status', 'mode', 'error_text', 'result_sent') if name in available]
+            columns = [name for name in ('id', 'brand', 'model', 'status', 'mode', 'error_text', 'result_sent',
+                                         'created_at', 'updated_at') if name in available]
             for start in range(0, len(ids), 200):
                 batch = ids[start:start + 200]
                 rows.extend(dict(row) for row in db.execute(
@@ -164,6 +171,85 @@ def _queue_rows(path, linked_ids, identities):
             return rows, True
     except (OSError, sqlite3.Error):
         return [], False
+
+
+def _card_prices(path, job_ids):
+    """Read prices from exact card-job links, including noncanonical cohort keys.
+
+    A canonical item's price can belong to an earlier selection. Only a row
+    explicitly linked to the selected card job is evidence for that card.
+    """
+    if path is None or not job_ids:
+        return []
+    try:
+        with closing(sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=10)) as db:
+            db.row_factory = sqlite3.Row
+            available = {row['name'] for row in db.execute('PRAGMA table_info(excel_items)')}
+            if not {'card_job', 'price', 'brand', 'model'} <= available:
+                return []
+            ids, result = list(job_ids), []
+            for start in range(0, len(ids), 200):
+                batch = ids[start:start + 200]
+                result.extend(dict(row) for row in db.execute(
+                    'SELECT card_job,price,brand,model FROM excel_items WHERE card_job IN (' +
+                    ','.join('?' for _ in batch) + ')', batch))
+            return result
+    except (OSError, sqlite3.Error):
+        return []
+
+
+def _recorded_price(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = Decimal(str(value))
+        if number.is_finite() and Decimal(0) < number <= Decimal('999999999999.99'):
+            return format(number.normalize(), 'f')
+    except (ValueError, ArithmeticError):
+        pass
+    return None
+
+
+def _created_at(value):
+    """SQLite CURRENT_TIMESTAMP is UTC; preserve explicit timezone offsets."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            # jobs.created_at defaults to SQLite CURRENT_TIMESTAMP (UTC).
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.isoformat()
+    except ValueError:
+        return None
+
+
+def _attach_card_prices(statuses, jobs, records, source_rows):
+    by_id = {job['id']: job for job in jobs}
+    by_position = {(row['attachment_index'], row['row_index']): row for row in source_rows}
+    for status in statuses:
+        if status.get('state') not in ('ready', 'published') or status.get('stage') != 'card':
+            continue
+        job = by_id.get(status.get('job_id'))
+        status.update(card_price=None, card_created_at=None, card_date_source=None,
+                      card_price_source=None, card_price_verified=False)
+        source = by_position.get((status['attachment_index'], status['row_index']))
+        if (not job or job.get('status') != 'done' or not source or
+                (_identity(source.get('brand') or ''), _model_identity(source.get('model') or '')) !=
+                (_identity(job.get('brand') or ''), _model_identity(job.get('model') or ''))):
+            continue
+        status['card_created_at'] = _created_at(job.get('created_at'))
+        if status['card_created_at'] is not None:
+            status['card_date_source'] = 'jobs.created_at'
+        identity = (_identity(job.get('brand') or ''), _model_identity(job.get('model') or ''))
+        linked = [record for record in records if record['card_job'] == job['id'] and
+                  isinstance(record.get('brand'), str) and isinstance(record.get('model'), str) and
+                  (_identity(record['brand']), _model_identity(record['model'])) == identity]
+        values = [_recorded_price(record['price']) for record in linked]
+        # Conflicting or missing prices are surfaced for manual review. A saved
+        # task price is not proof of the numerals rendered inside the bitmap.
+        if values and None not in values and len(set(values)) == 1:
+            status.update(card_price=values[0], card_price_source='excel_items.card_job')
 
 
 def _current_decision(item, decisions):
@@ -198,7 +284,7 @@ def lookup(state_path, queue_path, rows):
     items, state_available = _read(state_path, 'excel_items', keys)
     decisions, _ = _read(state_path, 'awaiting', keys)
     linked_ids = {item.get(field) for item in items for field in ('card_job', 'research_job')} - {None}
-    identities = {(_identity(row['brand']), _identity(row['model'])) for row in rows if key_for(row)}
+    identities = {(_identity(row['brand']), _model_identity(row['model'])) for row in rows if key_for(row)}
     jobs, queue_available = _queue_rows(queue_path, linked_ids, identities)
     by_key = {row.get('key'): row for row in items}
     awaiting = {row.get('key'): row for row in decisions}
@@ -206,7 +292,7 @@ def lookup(state_path, queue_path, rows):
     latest = {}
     for job in sorted(jobs, key=lambda row: row['id']):
         if isinstance(job.get('brand'), str) and isinstance(job.get('model'), str):
-            latest[(_identity(job['brand']), _identity(job['model']))] = job
+            latest[(_identity(job['brand']), _model_identity(job['model']))] = job
     result = []
     for row in rows:
         key = key_for(row)
@@ -217,7 +303,7 @@ def lookup(state_path, queue_path, rows):
             value['state'] = 'unreadable'
             result.append(value)
             continue
-        latest_job = latest.get((_identity(row['brand']), _identity(row['model'])))
+        latest_job = latest.get((_identity(row['brand']), _model_identity(row['model'])))
         linked = [item.get(field) for field in ('card_job', 'research_job')
                   if item and item.get(field) is not None]
         # A later exact-SKU run can use a cohort key while the canonical
@@ -255,6 +341,9 @@ def lookup(state_path, queue_path, rows):
                 value.update(origin='queue', state=_job_state(job, stage), stage=stage, job_id=job['id'],
                              error=job.get('error_text'), result_sent=bool(job.get('result_sent')))
         result.append(value)
+    _attach_card_prices(result, jobs, _card_prices(state_path, {
+        state['job_id'] for state in result if state.get('state') in ('ready', 'published')
+        and state.get('stage') == 'card' and state.get('job_id') is not None}), rows)
     return result
 
 

@@ -52,6 +52,9 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
             return {**(response or {"ok": True, "editorial": []}), "duplicate": True}
     results, editorial = [], []
     inventory = next((a["inventory"] for a in acts if a["type"] == "inspect_supplier_photo"), None)
+    if inventory is not None:
+        from orchestrator_bot.existing_cards import pricing
+        supplier_pricing = pricing(store.get_message(msg_id), acts)
     for action in acts:
         try:
             outcomes = intents.plan([action], factory.resolve, threshold)
@@ -61,7 +64,7 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
             continue
         for outcome in outcomes:
             try:
-                options = {"supplier_inventory": inventory} if inventory is not None else {}
+                options = {"supplier_inventory": inventory, 'supplier_pricing': supplier_pricing} if inventory is not None else {}
                 results.append(actions.execute(outcome, factory, store, msg_id, **options))
                 if outcome.kind in EDITORIAL:
                     editorial.append(outcome.action)
@@ -73,13 +76,19 @@ def handle_intent(store, factory, send, msg_id, raw_intent, threshold=40) -> dic
         if warning:
             results.append(warning)
     text, keyboard = intents.render(reply, results)
+    notices = [notice for result in results for notice in result.notices]
     try:
+        for notice in notices:
+            for part in text_chunks(notice):
+                send(part, [])
         parts = list(text_chunks(text or "Принял."))
         for n, part in enumerate(parts):
             send(part, keyboard if n == len(parts) - 1 else [])
     except Exception:
         log.exception("ответ владельцу не отправлен")
     response = {"ok": True, "editorial": editorial, "reply": text or "Принял."}
+    if notices:
+        response['notices'] = notices
     store.save_response(msg_id, response)
     store.mark_done(msg_id)
     return response
