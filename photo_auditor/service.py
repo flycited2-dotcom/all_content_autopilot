@@ -87,6 +87,8 @@ def make_server(store, token, port=8793):
         def do_GET(self):
             if not self.authorized():
                 return
+            if self.path == '/health':
+                return self.send_json(200, worker_health(server.audit_workers, store))
             if self.path == "/status":
                 return self.send_json(200, store.status())
             if self.path.startswith("/audits/"):
@@ -120,7 +122,9 @@ def make_server(store, token, port=8793):
             except (ValueError, TypeError, KeyError):
                 return self.send_json(400, {"error": "Invalid product, revision or image; snapshot conflict"})
             self.send_json(200, public_result(audit))
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server.audit_workers = []
+    return server
 
 
 def process_one(store, auditor, audit_id=None):
@@ -168,10 +172,48 @@ def process_one(store, auditor, audit_id=None):
     return True
 
 
-def worker_loop(store, auditor, stop):
-    while not stop.is_set():
-        if not process_one(store, auditor):
-            stop.wait(2)
+def worker_loop(store, auditor, stop, health=None):
+    """A transient queue/lease error must not silently remove an inspector."""
+    health = health if health is not None else {}
+    failures = 0
+    try:
+        while not stop.is_set():
+            health.update(last_poll=time.time(), state='working')
+            try:
+                processed = process_one(store, auditor)
+            except Exception as exc:
+                failures += 1
+                # Exception messages can contain connection details or source
+                # data. The category is enough for safe operational diagnosis.
+                category = type(exc).__name__
+                log.warning('Поток фотоаудитора восстановится после ошибки очереди: %s', category)
+                health.update(state='backoff', consecutive_errors=failures, last_error=category)
+                stop.wait(min(30, 2 ** min(failures, 5)))
+                continue
+            failures = 0
+            health.update(last_success=time.time(), consecutive_errors=0, last_error=None,
+                          state='working' if processed else 'idle')
+            if not processed:
+                stop.wait(2)
+    finally:
+        health['state'] = 'stopped'
+
+
+def worker_health(workers, store, now=None):
+    """Observe the actual pool, not merely a listening HTTP socket."""
+    now = time.time() if now is None else now
+    details = []
+    for worker in workers:
+        health = dict(getattr(worker, 'audit_health', {}))
+        polled = health.get('last_poll')
+        details.append({'alive': worker.is_alive(), 'state': health.get('state', 'starting'),
+                        'last_poll_age': max(0, now - polled) if isinstance(polled, (int, float)) else None,
+                        'consecutive_errors': health.get('consecutive_errors', 0),
+                        'last_error': health.get('last_error')})
+    alive = sum(row['alive'] for row in details)
+    return {'ok': bool(workers) and alive == len(workers),
+            'workers': {'expected': len(workers), 'alive': alive, 'details': details},
+            'queue': store.status()}
 
 
 def start_workers(store, auditor_factory, stop, count=2):
@@ -179,7 +221,9 @@ def start_workers(store, auditor_factory, stop, count=2):
         raise ValueError('Допустима одна или две параллельные проверки')
     workers = []
     for _ in range(count):
-        worker = threading.Thread(target=worker_loop, args=(store, auditor_factory(), stop), daemon=True)
+        health = {'state': 'starting', 'consecutive_errors': 0, 'last_error': None}
+        worker = threading.Thread(target=worker_loop, args=(store, auditor_factory(), stop, health), daemon=True)
+        worker.audit_health = health
         worker.start()
         workers.append(worker)
     return workers

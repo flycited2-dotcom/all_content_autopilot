@@ -42,7 +42,8 @@ def run(cf, args):
             return decision.status if decision and decision.status in ('rejected', 'published') else item.status if item else 'missing'
         return {'cancelled': len(cancelled), 'not_cancelled': [{'key': k, 'status': status(k)} for k in keys if k not in cancelled],
                 'text': '\n'.join(t for t in texts if t)}
-    out = {'total': len(keys), 'ready': 0, 'in_work': 0, 'published': 0, 'dropped': 0, 'errors': []}
+    out = {'total': len(keys), 'ready': 0, 'in_work': 0, 'published': 0, 'dropped': 0, 'errors': [],
+           'stages': {stage: 0 for stage in ('new', 'submission', 'research', 'card', 'preview')}}
     for key in keys:
         decision, item = decision_for(key), excel.get(key)
         if decision and decision.status == 'pending':
@@ -53,6 +54,7 @@ def run(cf, args):
             out['dropped'] += 1
         elif item and item.status in ('new', 'research', 'card', 'submission', 'preview'):
             out['in_work'] += 1
+            out['stages'][item.status] += 1
         else:
             out['dropped'] += 1
             if item and item.error:

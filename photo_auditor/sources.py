@@ -75,10 +75,13 @@ class Page(HTMLParser):
         self.image_order = []
         self.headings, self._heading = [], 0
         self.named_images = []
+        self.gallery_images, self._anchors = [], []
         self.micro_products, self._elements = [], []
 
     def handle_starttag(self, tag, attrs):
         attr = dict(attrs)
+        if tag == 'a':
+            self._anchors.append(attr.get('href', ''))
         micro = self._elements[-1][1] if self._elements else None
         if re.search(r'(?:^|/)Product/?$', attr.get('itemtype', '')):
             micro = {'names': [], 'images': set()}
@@ -107,6 +110,12 @@ class Page(HTMLParser):
             self.image_order.append(attr.get('content', ''))
         if tag == "img":
             names = ' '.join(attr.get(k, '') for k in ('alt', 'title', 'aria-label'))
+            if self._anchors and re.search(r'\.(?:png|jpg|jpeg|webp)(?:\?|$)', self._anchors[-1], re.I):
+                original = self._anchors[-1]
+                self.gallery_images.append((names, original))
+                self.named_images.append((names, original))
+                self.image_order.append(original)
+                self.images.add(original)
             for key in ("src", "data-src", "data-original", "data-large", "data-zoom-image"):
                 if attr.get(key) and not attr[key].startswith('data:'):
                     self.images.add(attr[key])
@@ -123,6 +132,8 @@ class Page(HTMLParser):
             self.images.add(attr["href"])
 
     def handle_endtag(self, tag):
+        if tag == 'a' and self._anchors:
+            self._anchors.pop()
         for n in range(len(self._elements) - 1, -1, -1):
             if self._elements[n][0] == tag:
                 del self._elements[n:]

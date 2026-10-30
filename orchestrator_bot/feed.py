@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 from datetime import date, datetime, timedelta
 
@@ -15,6 +16,8 @@ log = logging.getLogger("orchestrator_bot")
 
 DIGEST_AT = (9, 30)
 POLL_EVERY = 120                         # проверка готовности партий
+PROGRESS_INITIAL_AGE = 60 * 60
+PROGRESS_MIN_INTERVAL = 60
 FEED_BUTTON = {"text": "🗂 Лента", "callback_data": "f:show"}
 _ISO = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
@@ -132,6 +135,72 @@ def _publish(deps, chat_id, batch) -> None:
     deps.tg.send(chat_id, _published_text(f"Партия «{batch['category']}»", res))
 
 
+def _manual_progress(deps, batch, status, now):
+    """A manual cohort reports queue facts without waiting for every preview.
+
+    Existing unattended backlog stays quiet. A recent manual cohort receives
+    one initial status, then only changed counts, with a durable restart guard.
+    """
+    entry = deps.store.get_log(batch['log_id'])
+    if not entry or not entry.get('result', {}).get('manual_generation_id'):
+        return
+    fields = ('total', 'ready', 'in_work', 'published', 'dropped')
+    counts = {key: status.get(key) for key in fields}
+    if (any(type(value) is not int or value < 0 for value in counts.values()) or
+            not counts['total'] or sum(counts[key] for key in fields[1:]) != counts['total']):
+        return
+    stages = status.get('stages')
+    if (isinstance(stages, dict) and
+            set(stages) == {'new', 'submission', 'research', 'card', 'preview'} and
+            all(type(value) is int and value >= 0 for value in stages.values()) and
+            sum(stages.values()) == counts['in_work']):
+        counts['stages'] = dict(stages)
+    # A status query may race a correction/cancellation; do not report its old
+    # snapshot after the batch has moved or reopened under a newer revision.
+    current = deps.store.get_batch(batch['log_id'])
+    if not current or current['status'] != 'open' or current['updated'] != batch['updated']:
+        return
+    key = 'batch_progress:' + str(batch['log_id'])
+    try:
+        previous = json.loads(deps.store.get_meta(key) or 'null')
+    except (TypeError, ValueError):
+        previous = None
+    if not isinstance(previous, dict):
+        previous = None
+    if previous and previous.get('counts') == counts:
+        return
+    sent_at = previous.get('sent_at') if previous else None
+    if type(sent_at) in (int, float) and now - sent_at < PROGRESS_MIN_INTERVAL:
+        return
+    if previous is None and not 0 <= now - batch['created'] <= PROGRESS_INITIAL_AGE:
+        # Establish a baseline for older cohorts without announcing old work.
+        deps.store.set_meta(key, json.dumps({'counts': counts, 'sent_at': None}))
+        return
+    text = (f"⏳ Партия «{batch['category']}» в конвейере.\n"
+            f"Готово к проверке: {counts['ready']} из {counts['total']}.\n"
+            f"В очереди и обработке: {counts['in_work']}. "
+            f"Без готового превью: {counts['dropped']}.")
+    if counts['published']:
+        text += f"\nУже опубликовано: {counts['published']}."
+    if 'stages' in counts:
+        stages = counts['stages']
+        text += (f"\nЭтап поиска исходников: {stages['research']}; "
+                 f"создания карточек: {stages['card']}; "
+                 f"ожидания передачи: {stages['new'] + stages['submission']}; "
+                 f"передачи на проверку: {stages['preview']}.")
+    if status.get('errors'):
+        from orchestrator_bot.key_commands import readable_errors
+        text += '\n' + readable_errors(status['errors'])
+    text += '\nПубликация — после вашего решения.'
+    # Record the attempted notification first: a lost Telegram acknowledgement
+    # must not cause the same unchanged status to be sent on every poll.
+    deps.store.set_meta(key, json.dumps({'counts': counts, 'sent_at': now}))
+    try:
+        deps.tg.send(deps.owner_chat_id, text)
+    except Exception:
+        log.exception('статус ручной партии %s не подтверждён Telegram', batch['log_id'])
+
+
 def tick(deps, now: float) -> None:
     """Из цикла бота: утренняя сводка, готовность партий, выход одобренных партий в своё время."""
     moment = datetime.fromtimestamp(now)
@@ -159,6 +228,7 @@ def tick(deps, now: float) -> None:
             log.exception("статус партии %s", batch["log_id"])
             continue
         if status["in_work"]:
+            _manual_progress(deps, batch, status, now)
             continue                                  # ещё генерируется — ждём всю партию
         if not status["ready"]:
             if status['published'] == status['total'] and status['total']:

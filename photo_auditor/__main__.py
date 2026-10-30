@@ -86,8 +86,8 @@ def main(argv=None):
     stop = threading.Event()
     threading.Thread(target=watch_parent, args=(os.getppid(), stop), daemon=True).start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    start_workers(store, lambda: Auditor(ROOT, ChatGPTProvider(ChatGPTAuth(ROOT))), stop,
-                  count=int(os.environ.get('PHOTO_AUDIT_WORKERS', '2')))
+    server.audit_workers = start_workers(store, lambda: Auditor(ROOT, ChatGPTProvider(ChatGPTAuth(ROOT))), stop,
+                                        count=int(os.environ.get('PHOTO_AUDIT_WORKERS', '2')))
     tg = TelegramApi(config["bot_token"])
     owner=int(os.environ.get('PHOTO_AUDIT_OWNER','1264067528'))
     threading.Thread(target=maintenance_loop,args=(store,tg,owner,stop),daemon=True).start()
