@@ -531,3 +531,16 @@ def test_cancel_closes_batch(deps):
     log_id = _batch(deps)
     bot.handle_update(_cb(f"c:{log_id}"), deps)
     assert deps.store.get_batch(log_id)["status"] == "closed"
+
+
+def test_ready_batch_older_than_three_days_is_closed_once(deps):
+    from orchestrator_bot import feed
+    deps.factory = FeedFactory()
+    old = _batch(deps)
+    deps.store.move_batch(old, ("open",), "ready", now=NOW - 4 * 86400)
+    fresh = _batch(deps)
+    deps.store.move_batch(fresh, ("open",), "ready", now=NOW - 3600)
+    feed.expire_old_batches(deps, NOW)
+    feed.expire_old_batches(deps, NOW)                                # повторно — без второго сообщения
+    assert deps.store.get_batch(old)["status"] == "closed" and deps.store.get_batch(fresh)["status"] == "ready"
+    assert sum("Снял партии" in t for t in deps.tg.texts()) == 1

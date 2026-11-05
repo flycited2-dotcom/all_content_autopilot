@@ -16,6 +16,7 @@ log = logging.getLogger("orchestrator_bot")
 
 DIGEST_AT = (9, 30)
 POLL_EVERY = 120                         # проверка готовности партий
+READY_TTL = 3 * 86400                    # партия ждёт решения дольше — цены в карточках неактуальны (как повтор товара)
 PROGRESS_INITIAL_AGE = 60 * 60
 PROGRESS_MIN_INTERVAL = 60
 FEED_BUTTON = {"text": "🗂 Лента", "callback_data": "f:show"}
@@ -201,8 +202,23 @@ def _manual_progress(deps, batch, status, now):
         log.exception('статус ручной партии %s не подтверждён Telegram', batch['log_id'])
 
 
+def expire_old_batches(deps, now: float) -> None:
+    """Партии, которые владелец не решил за 3 суток, снимаются: цены уже устарели, сводка не должна
+    неделями напоминать о них. Превью остаются в группе проверки; товар можно поставить заново."""
+    gone = []
+    for batch in deps.store.batches("ready"):
+        if now - batch["updated"] > READY_TTL and \
+                deps.store.move_batch(batch["log_id"], ("ready",), "closed", now=now, expected_updated=batch["updated"]):
+            gone.append(f"«{batch['category']}» ({len(batch['keys'])})")
+    if gone:
+        deps.tg.send(deps.owner_chat_id,
+                     "🧹 Снял партии, которые ждали решения больше 3 суток (цены устарели): " + ", ".join(gone)
+                     + ".\nЧтобы выложить — поставьте задачу заново, возьму свежие цены.")
+
+
 def tick(deps, now: float) -> None:
     """Из цикла бота: утренняя сводка, готовность партий, выход одобренных партий в своё время."""
+    expire_old_batches(deps, now)
     moment = datetime.fromtimestamp(now)
     day = moment.date().isoformat()
     if (moment.hour, moment.minute) >= DIGEST_AT and deps.store.get_meta("digest_day") != day:
@@ -232,12 +248,12 @@ def tick(deps, now: float) -> None:
             continue                                  # ещё генерируется — ждём всю партию
         if not status["ready"]:
             if status['published'] == status['total'] and status['total']:
-                if deps.store.move_batch(batch['log_id'], ('open',), 'published', expected_updated=batch['updated']):
+                if deps.store.move_batch(batch['log_id'], ('open',), 'published', now=now, expected_updated=batch['updated']):
                     deps.tg.send(deps.owner_chat_id,
                         f"📦 Партия «{batch['category']}» уже опубликована: "
                         f"{status['published']} из {status['total']} карточек. Новая публикация не запускалась.")
                 continue
-            if deps.store.move_batch(batch["log_id"], ("open",), "failed", expected_updated=batch['updated']):
+            if deps.store.move_batch(batch["log_id"], ("open",), "failed", now=now, expected_updated=batch['updated']):
                 from orchestrator_bot.key_commands import readable_errors
                 detail = readable_errors(status.get('errors', []))
                 deps.tg.send(deps.owner_chat_id,
@@ -247,7 +263,7 @@ def tick(deps, now: float) -> None:
                     "Причины — в отчётах фотоаудитора @foto_auditor_bot и статусе Никиты. "
                     "Новая публикация не запускалась." + ('\n\n' + detail if detail else ''))
             continue
-        if not deps.store.move_batch(batch["log_id"], ("open",), "ready", expected_updated=batch['updated']):
+        if not deps.store.move_batch(batch["log_id"], ("open",), "ready", now=now, expected_updated=batch['updated']):
             continue
         if status['dropped'] or status['published']:
             summary = (f"📦 В партии «{batch['category']}» готово к проверке: "

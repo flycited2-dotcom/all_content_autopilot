@@ -48,6 +48,8 @@ class Store:
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._c() as db:
+            # WAL: читатели не блокируют писателя («database is locked» на heartbeat слушателя, 2026-11-05)
+            db.execute("PRAGMA journal_mode=WAL")
             db.executescript(_SCHEMA)
             for ddl in _MIGRATIONS:
                 try:
