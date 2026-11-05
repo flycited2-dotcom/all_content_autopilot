@@ -58,7 +58,8 @@ class Store:
                     pass                             # колонка уже есть
 
     def _c(self):
-        db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        # 30 с ожидания занятой базы: при 10 с короткая занятость раз в час давала 500 на heartbeat (2026-11-05)
+        db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         db.row_factory = sqlite3.Row
         return _Closing(db)
 

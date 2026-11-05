@@ -132,6 +132,7 @@ def complete_turn(payload: dict, session: tuple[str, bool], runner=run_with_kill
     chat_dir = root / "runs" / "chat"
     chat_dir.mkdir(parents=True, exist_ok=True)
     msg_id = payload["message"]["id"]
+    proc = None
     try:
         if type(msg_id) is not int or msg_id < 1:
             raise ValueError("Неверный номер сообщения")
@@ -153,8 +154,25 @@ def complete_turn(payload: dict, session: tuple[str, bool], runner=run_with_kill
         raise ProviderError("claude", "timeout", "Claude не ответил вовремя") from None
     except OSError:
         raise ProviderError("claude", "configuration", "Не удалось запустить Claude") from None
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        save_invalid_response(chat_dir, msg_id, proc, exc)
         raise ProviderError("claude", "invalid_response", "Claude вернул неверное намерение") from None
+
+
+def save_invalid_response(chat_dir: Path, msg_id, proc, exc) -> None:
+    """Сырой ответ Claude, не прошедший проверку, — в runs/chat/invalid/: без него причину сбоя
+    («Обработчик claude недоступен: invalid_response», 2026-11-05) было не установить."""
+    try:
+        target = chat_dir / "invalid"
+        target.mkdir(parents=True, exist_ok=True)
+        stdout = (getattr(proc, "stdout", None) or "")[-50_000:]
+        stderr = (getattr(proc, "stderr", None) or "")[-5_000:]
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        (target / f"{stamp}-{msg_id}.txt").write_text(
+            f"ошибка: {exc.__class__.__name__}: {exc}\nкод: {getattr(proc, 'returncode', None)}\n"
+            f"--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n", encoding="utf-8")
+    except OSError:
+        log.exception("сырой ответ Claude не сохранён")
 
 
 def run_turn(payload: dict, session: tuple[str, bool], runner=run_with_kill, root=Path(".")) -> dict:

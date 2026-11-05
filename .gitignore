@@ -5,3 +5,4 @@ __pycache__/
 .pytest_cache/
 runs_test/
 .codex-remote-attachments/
+logs/

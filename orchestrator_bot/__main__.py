@@ -5,6 +5,7 @@ import logging
 import sys
 import threading
 import time
+from pathlib import Path
 
 from orchestrator_bot import bot, report
 from orchestrator_bot import drafts
@@ -38,8 +39,20 @@ def _warm(voice_model) -> None:
         logging.getLogger("orchestrator_bot").exception("модель голоса не прогрелась — загрузится по первому голосовому")
 
 
-def configure_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+LOG_FILE = Path(__file__).resolve().parents[1] / "logs" / "orchestrator-bot.log"
+
+
+def configure_logging(log_file: Path = LOG_FILE) -> None:
+    """Журнал и в systemd, и в свой файл с ротацией: общий журнал сервера (100 МБ) чужие службы
+    вытесняют за пару часов, и дневные ошибки бота к вечеру было не найти (2026-11-05)."""
+    from logging.handlers import RotatingFileHandler
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=5, encoding="utf-8"))
+    except OSError:
+        pass                                      # без файла — только systemd, бот всё равно работает
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", handlers=handlers)
     for name in ("httpx", "httpcore"):            # их INFO пишет URL Bot API — а в нём токен бота
         logging.getLogger(name).setLevel(logging.WARNING)
 

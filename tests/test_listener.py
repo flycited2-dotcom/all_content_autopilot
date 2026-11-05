@@ -328,3 +328,34 @@ def test_editorial_time_travels_with_draft(tmp_path):
     worker.submit({"type": "run_editorial", "brief": "доставка", "channels": [], "at": "18:00", "day": None})
     worker.join_idle(5)
     assert sent[0]["at"] == "18:00"
+
+
+def test_invalid_claude_answer_is_saved_for_diagnosis(tmp_path):
+    # 2026-11-05: «Обработчик claude недоступен: invalid_response» — причину без сырого ответа не найти
+    from listener import brain
+    from types import SimpleNamespace as NS
+    payload = {"message": {"id": 77, "kind": "text", "text": "Тепловые пушки"}, "context": {}}
+    runner = lambda cmd, **kw: NS(returncode=0, stdout='{"result": "не JSON, а рассуждение"}', stderr="")
+    import pytest
+    with pytest.raises(brain.ProviderError):
+        brain.complete_turn(payload, ("s", True), runner=runner, root=tmp_path)
+    saved = list((tmp_path / "runs" / "chat" / "invalid").glob("*-77.txt"))
+    assert len(saved) == 1 and "не JSON, а рассуждение" in saved[0].read_text(encoding="utf-8")
+
+
+def test_bot_logs_to_rotating_file(tmp_path):
+    import logging
+    from orchestrator_bot.__main__ import configure_logging
+    root = logging.getLogger()
+    before = list(root.handlers)
+    root.handlers.clear()
+    try:
+        configure_logging(tmp_path / "logs" / "bot.log")
+        logging.getLogger("orchestrator_bot").error("проверка файла журнала")
+        for h in root.handlers:
+            h.flush()
+        assert "проверка файла журнала" in (tmp_path / "logs" / "bot.log").read_text(encoding="utf-8")
+    finally:
+        for h in root.handlers:
+            h.close()
+        root.handlers[:] = before
