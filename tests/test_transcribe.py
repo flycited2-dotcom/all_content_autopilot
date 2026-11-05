@@ -163,3 +163,12 @@ def test_normal_brand_and_correction_speech_stays_on_one_pass(monkeypatch):
     assert t(b'brand', 'Бренды: Ресанта, Carver') == 'Ресанта'
     assert t(b'correction', 'CARVER PPG-5000D. Генератор бензиновый') == 'Убери бензин, генератор дизельный'
     assert all(call['vad_filter'] is True for call in model.calls)
+
+
+def test_warm_loads_model_once_before_first_voice():
+    from orchestrator_bot.transcribe import Transcriber
+    loads = []
+    t = Transcriber("small", model_factory=lambda size: loads.append(size) or object())
+    t.warm()
+    t.warm()
+    assert loads == ["small"]

@@ -31,6 +31,13 @@ def _report_text(store, factory) -> str:
                                drafts=store.drafts_summary(since))
 
 
+def _warm(voice_model) -> None:
+    try:
+        voice_model.warm()
+    except Exception:
+        logging.getLogger("orchestrator_bot").exception("модель голоса не прогрелась — загрузится по первому голосовому")
+
+
 def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     for name in ("httpx", "httpcore"):            # их INFO пишет URL Bot API — а в нём токен бота
@@ -52,6 +59,8 @@ def main(argv=None) -> int:
     if mode == "report":
         tg.send(settings.owner_chat_id, _report_text(store, factory))
         return 0
+    if mode == "run":                                  # модель голоса — в фоне, пока бот уже принимает сообщения
+        threading.Thread(target=_warm, args=(voice_model,), daemon=True).start()
     if mode != "run":
         print("usage: python -m orchestrator_bot run|report", file=sys.stderr)
         return 2

@@ -5,3 +5,4 @@ stop_words: [гарантирован, "лучший в мире", "лучшая
 forbid_prices: true
 require_sources: true
 require_visual_prompt: true
+forbid_links: true         # ссылок в тексте нет: источники — только в facts/source_urls; сайт и телефон добавляет система

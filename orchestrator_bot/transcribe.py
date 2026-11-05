@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import re
 from collections import Counter
 
@@ -28,10 +29,16 @@ class Transcriber:
         self.model_size = model_size
         self.model_factory = model_factory or _whisper
         self._model = None
+        self._load_lock = threading.Lock()
+
+    def warm(self) -> None:
+        """Загрузить модель заранее (при старте бота): первое голосовое после перезапуска ждало ~минуту."""
+        with self._load_lock:
+            if self._model is None:
+                self._model = self.model_factory(self.model_size)
 
     def __call__(self, ogg: bytes, hint: str) -> str:
-        if self._model is None:
-            self._model = self.model_factory(self.model_size)
+        self.warm()
         audio = decode_ogg(ogg)
         # condition_on_previous_text=False: иначе на длинной записи модель зацикливается
         # («RULE, RULE, RULE…», голосовое владельца 2026-10-21)

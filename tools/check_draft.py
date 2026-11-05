@@ -117,6 +117,8 @@ def check(draft: dict, rules: dict, research_facts: list[dict] | None = None) ->
     supported = set().union(*(numbers(fact["text"]) for fact in draft["facts"]))
     for number in sorted(numbers(text) - supported):
         reasons.append(f"число {number} в тексте не подтверждено фактом")
+    if rules.get("forbid_links") and _URL.search(text):
+        reasons.append("ссылки в тексте запрещены (источники — только в facts/source_urls)")
     if rules["require_sources"]:
         if not draft["source_urls"]:
             reasons.append("нет источников")

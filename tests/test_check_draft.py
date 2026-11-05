@@ -181,3 +181,13 @@ def test_bom_draft_is_accepted(tmp_path, rules_dir, capsys):
 def test_main_reports_text_length(tmp_path, rules_dir, capsys):
     code, out = _run(tmp_path, rules_dir, _draft(), capsys)
     assert out["length"] == len(_draft()["text"])
+
+
+def test_links_in_text_are_rejected_when_rules_forbid_them():
+    from tools.check_draft import check
+    rules = {"min_length": 1, "max_length": 5000, "stop_words": [], "forbid_prices": False, "require_sources": False,
+             "require_visual_prompt": False, "forbid_links": True}
+    draft = {"channel": "vk_editorial", "text": "Текст.\n📚 Источники:\nhttps://mir-klimata.info/x", "facts": [],
+             "source_urls": [], "visual_prompt": ""}
+    assert "ссылки в тексте запрещены" in " ".join(check(draft, rules))
+    assert not check({**draft, "text": "Текст без ссылок."}, rules)
