@@ -228,6 +228,24 @@ def test_editorial_correction_is_previewed_before_render(deps):
     assert len(deps.factory.visual_calls) == 1
 
 
+def test_text_remark_goes_to_editor_not_designer(deps):
+    deps.store.add_draft({'id': 'post', 'channel': 'tg_editorial', 'title': 'Отопление',
+                          'text': 'Текст', 'visual_prompt': 'Старое задание'}, 'post')
+    row = deps.store.get_draft('post')
+    deps.store.update_draft(row['n'], status='ready', image_job=77)
+    bot.handle_update(cb(f"d:f:{row['n']}"), deps)
+    bot.handle_update(message('В тексте опять ссылка на сайт, убери'), deps)
+    keyboard = deps.tg.sent[-1][1]
+    assert keyboard[0][0]['callback_data'] == f"d:t:{row['n']}"          # про текст — кнопка текста первой
+    assert keyboard[1][0]['callback_data'] == f"d:g:{row['n']}"
+    before = deps.store.count_new()
+    bot.handle_update(cb(f"d:t:{row['n']}"), deps)
+    assert not deps.factory.visual_calls                                   # картинку не заказали
+    assert deps.store.count_new() == before + 1                            # правка ушла в разговор
+    bot.handle_update(cb(f"d:t:{row['n']}"), deps)                         # повторное нажатие — без дубля
+    assert deps.store.count_new() == before + 1
+
+
 def test_new_correction_is_not_dropped_after_long_previous_prompt(deps):
     deps.store.add_draft({'id': 'post', 'channel': 'tg_editorial', 'title': 'Генератор',
                           'text': 'Текст', 'visual_prompt': 'Старое описание ' * 200}, 'post')

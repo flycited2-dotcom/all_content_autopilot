@@ -164,9 +164,16 @@ def _take_note(deps, chat_id, text) -> str | None:
         if note['kind'] == 'correction':
             note.update(notes=text.strip(), phase='confirm')
             deps.store.set_meta(AWAIT_NOTE, json.dumps(note, ensure_ascii=False))
+            # 2026-11-05: замечание «в тексте ссылка» ушло дизайнеру картинки. Теперь владелец
+            # сам выбирает, кому оно: картинке (дизайнер) или тексту поста (редактор).
+            text_first = bool(re.search(r'текст|ссылк|абзац|опечат|слов|фраз|предложени|заголов|пишет|написан',
+                                        text, re.I))
+            image_btn = [{'text': '🖼 Исправить картинку', 'callback_data': f"d:g:{row['n']}"}]
+            text_btn = [{'text': '📝 Исправить текст поста', 'callback_data': f"d:t:{row['n']}"}]
             deps.tg.send(chat_id, f"Замечание к «{row['title']}»:\n\n{text}\n\n"
-                         'По кнопке передам замечание дизайнеру и запущу новую картинку. Публикация не запускается.',
-                         [[{'text': '🔄 Исправить по замечанию', 'callback_data': f"d:g:{row['n']}"}],
+                         'Куда передать? Картинку переделает дизайнер, текст поста — редактор. '
+                         'Публикация не запускается.',
+                         [*([text_btn, image_btn] if text_first else [image_btn, text_btn]),
                           [{'text': 'Отмена', 'callback_data': f"d:h:{row['n']}"}]])
             return None
         deps.tg.send(chat_id, drafts.redo_visual(deps.store, deps.factory, row["n"], text, deps.tg, chat_id))
@@ -357,7 +364,7 @@ def _callback(deps, cq):
             drafts.reject(deps.store, deps.tg, chat_id, int(n))
         elif op == "i":
             drafts.retry_image(deps.store, deps.factory, deps.tg, chat_id, int(n))
-        elif op in ('g', 'h'):
+        elif op in ('g', 'h', 't'):
             try:
                 note = json.loads(deps.store.get_meta(AWAIT_NOTE) or '{}')
             except ValueError:
@@ -370,6 +377,10 @@ def _callback(deps, cq):
             deps.store.set_meta(AWAIT_NOTE, '')
             if op == 'h':
                 deps.tg.send(chat_id, 'Исправление отменено. Новая картинка не заказывалась.')
+            elif op == 't':                          # правка текста — редактору, как ответ на черновик
+                deps.tg.send(chat_id, f"📝 Передаю редактору правку текста «{row['title']}». Картинку не трогаю.")
+                _queue(deps, chat_id, None, 'text',
+                       f"Исправь текст поста по замечанию: {note['notes']}\n[ответ на черновик id: {row['id']}]")
             elif row.get('image_job') != note.get('image_job'):
                 deps.tg.send(chat_id, 'Карточка уже изменилась. Нажмите «Указать ошибку» под актуальной версией.')
             else:
@@ -393,9 +404,10 @@ def _callback(deps, cq):
                                                        'image_job': row.get('image_job')}))
             if op == 'f':
                 deps.tg.send(chat_id, f"Напишите или надиктуйте, что неверно в карточке «{row['title']}» "
-                             "и как должно быть. Передам замечание дизайнеру вместе с предыдущим заданием. "
-                             "Например: «Это дизельный генератор, убери бензин». "
-                             "Сначала покажу текст, затем нужно подтвердить переделку кнопкой. Отмена — /cancel.")
+                             "и как должно быть — в картинке или в тексте поста. "
+                             "Например: «Это дизельный генератор, убери бензин» или «Убери ссылку из текста». "
+                             "Сначала покажу замечание, затем выберете кнопкой: исправить картинку или текст. "
+                             "Отмена — /cancel.")
                 return
             what = "картинке" if kind == "visual" else "тексте"
             deps.tg.send(chat_id, f"Напишите или надиктуйте, что изменить в {what} «{row['title']}».")
