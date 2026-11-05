@@ -192,7 +192,8 @@ def run(root, brand, model, category, *, provider=None, web=None):
             pass
     folder = cache / uuid.uuid4().hex
     folder.mkdir(parents=True)
-    auditor = Auditor(root, provider or ChatGPTProvider(ChatGPTAuth(root)), web)
+    from listener.claude_inspect import auditor_provider
+    auditor = Auditor(root, provider or auditor_provider(root), web)
     product = {'brand': brand, 'model': model, 'category': category}
     sources, paths, errors = collect(product, auditor.brands.get(model_key(brand), []),
                                      auditor._research, auditor.web, folder)

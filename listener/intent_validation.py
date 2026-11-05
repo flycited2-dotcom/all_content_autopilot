@@ -35,9 +35,30 @@ def _when(action):
         date.fromisoformat(day)
 
 
+def json_text(text: str) -> str:
+    """Сам JSON из ответа модели. 2026-11-05 Claude весь вечер отвечал верным намерением,
+    но в рамке ```json или с фразой перед ним — и каждый ход шёл в брак (invalid_response).
+    Достаём единственный объект; дальше он проходит ту же строгую проверку."""
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+    fenced = re.findall(r"```(?:json)?\s*\n?(.*?)```", stripped, re.S)
+    if len(fenced) == 1 and fenced[0].strip().startswith("{"):
+        return fenced[0].strip()
+    start = stripped.find("{")
+    if start < 0:
+        return stripped
+    try:
+        _, end = json.JSONDecoder().raw_decode(stripped[start:])
+    except ValueError:
+        return stripped
+    rest = stripped[start + end:].strip().strip("`").strip()
+    return stripped[start:start + end] if not rest else stripped
+
+
 def validated_intent(value) -> dict:
     if isinstance(value, str):
-        value = json.loads(value, object_pairs_hook=_object,
+        value = json.loads(json_text(value), object_pairs_hook=_object,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Неверная константа JSON")))
     if not isinstance(value, dict) or set(value) != {"reply", "actions"} or not isinstance(value["reply"], str):
         raise ValueError("Неверный формат намерения")

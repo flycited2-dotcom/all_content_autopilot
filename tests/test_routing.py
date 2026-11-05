@@ -122,11 +122,18 @@ def test_bad_filter_never_disappears(bad):
         validated_intent({"reply": "ok", "actions": [{"type": "enqueue_products", "category": "кондиционеры", **bad}]})
 
 
-@pytest.mark.parametrize("text", ['prefix {"reply":"ok","actions":[]}', '{"reply":"ok","actions":[]} trailing',
-                                  '```json\n{"reply":"ok","actions":[]}\n```', '{"reply":"a","reply":"b","actions":[]}'])
+@pytest.mark.parametrize("text", ['{"reply":"ok","actions":[]} trailing', '{"reply":"a","reply":"b","actions":[]}',
+                                  'нет json', '```json\n{"reply":"a","reply":"b","actions":[]}\n```'])
 def test_non_json_or_duplicate_fields_rejected(text):
     with pytest.raises(ValueError):
         validated_intent(text)
+
+
+# 2026-11-05: Claude весь вечер отдавал верное намерение в рамке ```json или после фразы,
+# и каждый ход уходил в брак. Рамку и вводную фразу снимаем, объект проверяется так же строго.
+@pytest.mark.parametrize("text", ['prefix {"reply":"ok","actions":[]}', '```json\n{"reply":"ok","actions":[]}\n```'])
+def test_fenced_or_prefixed_intent_accepted(text):
+    assert validated_intent(text) == {"reply": "ok", "actions": []}
 
 
 class Api:

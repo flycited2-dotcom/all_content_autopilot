@@ -6,8 +6,8 @@ import threading
 import time
 from pathlib import Path
 
-from listener.chatgpt import ChatGPTProvider
 from listener.chatgpt_auth import ChatGPTAuth
+from listener.claude_inspect import auditor_provider   # ChatGPT ⇄ Claude при лимите
 from orchestrator_bot.telegram_api import TelegramApi
 from photo_auditor.credentials import SetupError, configure, credentials_path, load
 from photo_auditor.engine import Auditor
@@ -57,7 +57,7 @@ def main(argv=None):
                           "waiting": [{k: row[k] for k in ('id', 'product', 'provider_error', 'retry_at')}
                                       for row in store.waiting()]}, ensure_ascii=False))
         return 0
-    auditor = Auditor(ROOT, ChatGPTProvider(ChatGPTAuth(ROOT)))
+    auditor = Auditor(ROOT, auditor_provider(ROOT))
     if args.command == "check":
         job = store.submit({"product_id": args.product_id, "revision": 0, "brand": args.brand, "model": args.model}, args.image.read_bytes())
         if job["status"] == "queued":
@@ -86,7 +86,7 @@ def main(argv=None):
     stop = threading.Event()
     threading.Thread(target=watch_parent, args=(os.getppid(), stop), daemon=True).start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    server.audit_workers = start_workers(store, lambda: Auditor(ROOT, ChatGPTProvider(ChatGPTAuth(ROOT))), stop,
+    server.audit_workers = start_workers(store, lambda: Auditor(ROOT, auditor_provider(ROOT)), stop,
                                         count=int(os.environ.get('PHOTO_AUDIT_WORKERS', '2')))
     tg = TelegramApi(config["bot_token"])
     owner=int(os.environ.get('PHOTO_AUDIT_OWNER','1264067528'))
