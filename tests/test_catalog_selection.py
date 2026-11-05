@@ -115,6 +115,17 @@ def test_manual_picker_survives_reopen_and_double_click_cannot_enqueue_twice(dep
     assert ui.Sessions(deps.store).get(1)['state'] == 'done'
 
 
+def test_manual_picker_shows_full_names_in_text_and_short_buttons(deps):
+    session, _ = open_picker(deps)
+    callback(deps, session, 'manual')
+    text, keyboard = ui.render(ui.Sessions(deps.store).get(1))
+    names = [row['name'] for row in rows()[:ui.PAGE_SIZE]]
+    assert all(name in text for name in names)
+    toggles = [b for line in keyboard for b in line if ':toggle:' in b['callback_data']]
+    assert [b['text'] for b in toggles] == [f'▫️ {i + 1}' for i in range(ui.PAGE_SIZE)]
+    assert all(len(line) <= 3 for line in keyboard)
+
+
 def test_user_quantity_is_honored_without_model_or_second_question(deps):
     session, _ = open_picker(deps)
     callback(deps, session, 'count')

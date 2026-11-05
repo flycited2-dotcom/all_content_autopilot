@@ -74,12 +74,22 @@ def render(session):
     keyboard = []
     if session['view'] == 'manual':
         page = session['page']
-        text += f"\nСтраница {page + 1}/{max(1, math.ceil(len(items) / PAGE_SIZE))}. Отметьте нужные модели."
+        text += f"\nСтраница {page + 1}/{max(1, math.ceil(len(items) / PAGE_SIZE))}. Отметьте нужные номера.\n"
+        # Кнопки Telegram не переносят текст: длинное название обрезалось (2026-11-05).
+        # Полные названия — в тексте сообщения, на кнопках только номер и отметка.
+        row = []
         for index in range(page * PAGE_SIZE, min((page + 1) * PAGE_SIZE, len(items))):
             item = items[index]
             mark = '✅' if item['key'] in chosen else '▫️'
             name = item.get('name') or item.get('model') or item['brand']
-            keyboard.append([button(session, f'{mark} {index + 1}. {name[:48]}', 'toggle', index)])
+            text += f"\n{mark} {index + 1}. {name}"
+            row.append(button(session, f'{mark} {index + 1}', 'toggle', index))
+            if len(row) == 3:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        text += '\n'
         navigation = []
         if page:
             navigation.append(button(session, '← Назад', 'page', page - 1))
