@@ -215,3 +215,32 @@ def test_source_fallback_is_bounded_and_quota_is_not_retried():
     with pytest.raises(RuntimeError, match='usage_limit'):
         asyncio.run(search_product(limited, 'Midea', 'EXACT', 'холодильники'))
     assert len(calls) == 1
+
+
+def test_unrecoverable_checkpoint_is_backed_off_and_logged_once(tmp_path, monkeypatch, caplog):
+    """Пропавшая контрольная точка (бой: задания 3869/4035) не должна перебираться каждые 5 с."""
+    monkeypatch.setattr(runtime, 'load', lambda root: {'api_token': 'test'})
+    runtime.register_job(tmp_path, 123, 'kbt', 'Midea', 'ABC-12-RU', '')
+    store = AuditStore(tmp_path / 'runs/photo-auditor')
+    store.submit(product(), picture())
+    store.finish(store.claim(), report('approved'))
+    checks = []
+    def broken(*args):
+        checks.append(1)
+        raise integration.AuditHold('Контрольная точка повреждена; повторная генерация остановлена')
+    monkeypatch.setattr(runtime, 'approval_covers_brief', broken)
+    monkeypatch.setattr(service, '_recovery_holds', {})
+    now = [1000.0]
+    monkeypatch.setattr(service.time, 'time', lambda: now[0])
+    deliver = lambda payload: pytest.fail('Невосстановленное задание не доставляется')
+    with caplog.at_level('WARNING', logger='photo_auditor'):
+        for _ in range(50):                       # ~4 минуты опроса каждые 5 с
+            service.recover_pipeline(store, deliver)
+            now[0] += 5
+    assert len(checks) == 1
+    warnings = [r for r in caplog.records if 'Восстановление задания' in r.getMessage()]
+    assert len(warnings) == 1 and 'Контрольная точка повреждена' in warnings[0].getMessage()
+    now[0] += service.RECOVERY_HOLD_MIN
+    service.recover_pipeline(store, deliver)
+    assert len(checks) == 2                      # повтор — после паузы, и пауза растёт
+    assert service._recovery_holds[store.recovery_results()[0]['id']][1] == 2 * service.RECOVERY_HOLD_MIN

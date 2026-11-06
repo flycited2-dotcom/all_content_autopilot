@@ -349,6 +349,10 @@ def notify(store, tg, owner):
 
 REVIEW_RESUME_PAUSE = 600
 _review_resume_paused_until = 0.0
+# Невосстановимое задание (бой: пропала контрольная точка 3869/4035) перебиралось каждые
+# 5 с с 30.10 — 45 тыс. строк журнала. Теперь пауза растёт 5 мин → 6 ч, предупреждение одно.
+RECOVERY_HOLD_MIN, RECOVERY_HOLD_MAX = 300, 6 * 3600
+_recovery_holds: dict[str, tuple[float, float]] = {}
 
 
 def recover_pipeline(store, deliver=None):
@@ -378,6 +382,9 @@ def recover_pipeline(store, deliver=None):
         scope_path = root / 'runs/photo-auditor/job-scope' / (match[1] + '.json')
         if not scope_path.exists():
             continue
+        held = _recovery_holds.get(row['id'])
+        if held and time.time() < held[0]:
+            continue
         try:
             scope = runtime._read(root, int(match[1]))
             if scope.get('mode') == 'research' and not progress.restore_research(
@@ -385,9 +392,15 @@ def recover_pipeline(store, deliver=None):
                 continue
             if row['status'] == 'approved' and not runtime.approval_covers_brief(root, row['product'], row['report']):
                 continue
-        except Exception:
-            log.warning('Восстановление задания %s отложено: не подтверждено исходное задание', match[1])
+        except Exception as exc:
+            delay = min(held[1] * 2, RECOVERY_HOLD_MAX) if held else RECOVERY_HOLD_MIN
+            _recovery_holds[row['id']] = (time.time() + delay, delay)
+            if not held:
+                log.warning('Восстановление задания %s отложено: не подтверждено исходное задание (%s); '
+                            'повтор с растущей паузой до %d ч', match[1], str(exc)[:160] or type(exc).__name__,
+                            RECOVERY_HOLD_MAX // 3600)
             continue
+        _recovery_holds.pop(row['id'], None)
         payload = {'job_id': int(match[1]), 'audit_id': row['id'], 'attempt': row['attempt'],
                    'revision': row['revision'], 'status': row['status'], 'sha256': row['sha256'],
                    'brand': row['product']['brand'], 'model': row['product']['model']}
